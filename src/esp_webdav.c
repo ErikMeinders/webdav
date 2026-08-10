@@ -20,6 +20,20 @@ esp_err_t webdav_reply_error(httpd_req_t *req, const char *status)
     return httpd_resp_send(req, status, HTTPD_RESP_USE_STRLEN);
 }
 
+esp_err_t webdav_reply_error_close(httpd_req_t *req, const char *status)
+{
+    httpd_resp_set_hdr(req, "Connection", "close");
+    webdav_reply_error(req, status);
+    /* Returning ESP_FAIL makes esp_http_server close the socket. Required
+     * whenever we answer without having read the request body: the unread
+     * bytes would otherwise be parsed as the next request on this
+     * keep-alive connection, which surfaces as
+     * "httpd_parse: parse_block: incomplete (0/N) with parser error = 16"
+     * (HPE_INVALID_METHOD) and kills the connection anyway -- but only
+     * after corrupting whatever request the client sent next. */
+    return ESP_FAIL;
+}
+
 /* ---------------------------------------------------------------------- */
 /* GET / HEAD                                                              */
 /* ---------------------------------------------------------------------- */
@@ -179,51 +193,52 @@ static bool webdav_is_chunked_request(httpd_req_t *req)
 esp_err_t webdav_handle_put(httpd_req_t *req)
 {
     struct esp_webdav_server *srv = (struct esp_webdav_server *)req->user_ctx;
+
+    /* Every early return below answers before the body has been read, so all
+     * of them must close the connection rather than leave unread body bytes
+     * queued up to be mis-parsed as the next request. */
     if (srv->read_only) {
-        return webdav_reply_error(req, "403 Forbidden");
+        return webdav_reply_error_close(req, "403 Forbidden");
     }
 
     if (webdav_is_chunked_request(req) ||
         (req->content_len == 0 && httpd_req_get_hdr_value_len(req, "Content-Length") == 0)) {
         /* Chunked, or neither Content-Length nor chunked -- either way we
          * can't reliably read the body. */
-        return webdav_reply_error(req, "411 Length Required");
+        return webdav_reply_error_close(req, "411 Length Required");
     }
 
     char path[WEBDAV_MAX_PATH_LEN];
     esp_err_t err = webdav_resolve_path(srv, req, path, sizeof(path), NULL);
     if (err != ESP_OK) {
-        return webdav_reply_error(req, "400 Bad Request");
+        return webdav_reply_error_close(req, "400 Bad Request");
     }
 
     if (webdav_is_dir(path)) {
-        return webdav_reply_error(req, "409 Conflict");
+        return webdav_reply_error_close(req, "409 Conflict");
     }
     bool existed = (access(path, F_OK) == 0);
 
     FILE *f = fopen(path, "wb");
     if (!f) {
         /* Most likely the parent collection doesn't exist. */
-        return webdav_reply_error(req, "409 Conflict");
+        return webdav_reply_error_close(req, "409 Conflict");
     }
 
     char *buf = malloc(WEBDAV_IO_BUF_SIZE);
     if (!buf) {
         fclose(f);
         unlink(path);
-        return webdav_reply_error(req, "500 Internal Server Error");
+        return webdav_reply_error_close(req, "500 Internal Server Error");
     }
 
     esp_err_t io_err = ESP_OK;
     size_t remaining = req->content_len;
     while (remaining > 0) {
         size_t want = remaining < WEBDAV_IO_BUF_SIZE ? remaining : WEBDAV_IO_BUF_SIZE;
-        int r = httpd_req_recv(req, buf, want);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;
-        }
+        int r = webdav_recv_body(req, buf, want);
         if (r <= 0) {
-            io_err = ESP_FAIL;
+            io_err = (r == HTTPD_SOCK_ERR_TIMEOUT) ? ESP_ERR_TIMEOUT : ESP_FAIL;
             break;
         }
         if (fwrite(buf, 1, (size_t)r, f) != (size_t)r) {
@@ -236,8 +251,15 @@ esp_err_t webdav_handle_put(httpd_req_t *req)
     fclose(f);
 
     if (io_err != ESP_OK) {
+        /* Either way the body was left partly unread, so the connection has
+         * to go: see webdav_reply_error_close(). */
         unlink(path);
-        return webdav_reply_error(req, "500 Internal Server Error");
+        if (io_err == ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "PUT %s timed out with %u of %u bytes left unread", path,
+                     (unsigned)remaining, (unsigned)req->content_len);
+            return webdav_reply_error_close(req, "408 Request Timeout");
+        }
+        return webdav_reply_error_close(req, "500 Internal Server Error");
     }
 
     httpd_resp_set_status(req, existed ? "204 No Content" : "201 Created");
@@ -289,8 +311,9 @@ esp_err_t webdav_handle_mkcol(httpd_req_t *req)
     }
 
     if (req->content_len > 0) {
-        /* Extended MKCOL (RFC 5689) with a request body isn't supported. */
-        return webdav_reply_error(req, "415 Unsupported Media Type");
+        /* Extended MKCOL (RFC 5689) with a request body isn't supported.
+         * Close rather than leave that unread body on the connection. */
+        return webdav_reply_error_close(req, "415 Unsupported Media Type");
     }
 
     char path[WEBDAV_MAX_PATH_LEN];
@@ -338,19 +361,17 @@ esp_err_t webdav_handle_lock(httpd_req_t *req)
 {
     struct esp_webdav_server *srv = (struct esp_webdav_server *)req->user_ctx;
     if (srv->read_only) {
-        return webdav_reply_error(req, "403 Forbidden");
+        /* LOCK carries an XML body we haven't read yet. */
+        return webdav_reply_error_close(req, "403 Forbidden");
     }
 
     char discard[128];
     size_t remaining = req->content_len;
     while (remaining > 0) {
         size_t want = remaining < sizeof(discard) ? remaining : sizeof(discard);
-        int r = httpd_req_recv(req, discard, want);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;
-        }
+        int r = webdav_recv_body(req, discard, want);
         if (r <= 0) {
-            return webdav_reply_error(req, "400 Bad Request");
+            return webdav_reply_error_close(req, "400 Bad Request");
         }
         remaining -= (size_t)r;
     }
@@ -465,9 +486,19 @@ esp_err_t esp_webdav_start(const esp_webdav_config_t *config, esp_webdav_handle_
 
     httpd_config_t httpd_cfg = HTTPD_DEFAULT_CONFIG();
     httpd_cfg.server_port = config->server_port ? config->server_port : 80;
-    httpd_cfg.max_open_sockets = config->max_clients ? config->max_clients : 4;
+    httpd_cfg.max_open_sockets = config->max_clients ? config->max_clients : 7;
     httpd_cfg.uri_match_fn = httpd_uri_match_wildcard;
     httpd_cfg.stack_size = CONFIG_ESP_WEBDAV_HTTPD_STACK_SIZE;
+
+    /* Without this, a full socket table makes esp_http_server accept() a new
+     * connection and then immediately close() it -- the client just sees a
+     * TCP reset with no HTTP response. That matters here because WebDAV
+     * clients open several parallel connections per mount, and a peer that
+     * disappears (sleeping laptop, dropped WiFi) holds its slot with no idle
+     * timeout to reclaim it, so the table fills up and stays full until the
+     * device is rebooted. Evicting the least-recently-used connection instead
+     * makes that self-healing. */
+    httpd_cfg.lru_purge_enable = true;
 
     esp_err_t err = httpd_start(&srv->httpd, &httpd_cfg);
     if (err != ESP_OK) {

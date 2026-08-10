@@ -10,7 +10,30 @@
 
 #include "esp_webdav_priv.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 static const char s_hex[] = "0123456789ABCDEF";
+
+int webdav_recv_body(httpd_req_t *req, char *buf, size_t len)
+{
+    const TickType_t start = xTaskGetTickCount();
+    const TickType_t limit = pdMS_TO_TICKS(WEBDAV_BODY_TIMEOUT_MS);
+
+    while (true) {
+        int r = httpd_req_recv(req, buf, len);
+        if (r != HTTPD_SOCK_ERR_TIMEOUT) {
+            return r;
+        }
+        /* Unsigned tick arithmetic, so this stays correct across a tick
+         * counter wrap. Each call gets a fresh window: the timeout is
+         * "silent for this long", not "slow overall", so a genuinely slow
+         * but progressing upload is never cut off. */
+        if ((TickType_t)(xTaskGetTickCount() - start) >= limit) {
+            return HTTPD_SOCK_ERR_TIMEOUT;
+        }
+    }
+}
 
 bool webdav_url_decode(const char *src, char *dst, size_t dst_size)
 {

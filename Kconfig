@@ -35,6 +35,22 @@ menu "ESP WebDAV Server"
             nesting. Increase this further if you use a larger
             ESP_WEBDAV_MAX_PATH_LEN and deeply nested directories.
 
+    config ESP_WEBDAV_BODY_TIMEOUT_S
+        int "Request body receive timeout (seconds)"
+        default 30
+        range 5 600
+        help
+            How long to keep waiting for more request-body data from a
+            client that has stopped sending (a PUT upload, or the drained
+            body of a PROPFIND/PROPPATCH/LOCK) before giving up with
+            408 Request Timeout and closing the connection.
+
+            esp_http_server runs every handler in a single task, so a
+            handler that waits forever blocks the whole server, not just
+            its own connection. This bound is what stops a client that
+            disappears mid-upload (sleeping laptop, dropped WiFi) from
+            wedging the server until the device is rebooted.
+
     config ESP_WEBDAV_ALLOW_DEPTH_INFINITY
         bool "Allow 'Depth: infinity' on PROPFIND"
         default y

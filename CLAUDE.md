@@ -21,20 +21,28 @@ the **published registry package** (`erikmeinders/webdav`, see
 this repo — `managed_components/erikmeinders__webdav/` is a separate,
 downloaded copy pinned to whatever version the manifest specifies.
 
-**This means editing `src/`/`include/` here has no effect on the example
-until you either bump-and-publish a new version, or temporarily point back
-at local source.** To test local component changes before publishing, add
-back to `examples/littlefs_webdav/CMakeLists.txt`:
-```cmake
-set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../..")
+The dependency uses the component manager's `override_path`, so the example
+builds **this repo's `src/`**, not the downloaded registry copy:
+
+```yaml
+  erikmeinders/webdav:
+    version: "^0.1.0"
+    override_path: "../../../"
 ```
-(and `rm -rf managed_components/erikmeinders__webdav build` first, since a
-stale managed copy or cached build otherwise wins) — then revert before
-committing, since the example is meant to also serve as an end-to-end smoke
-test that the published package actually resolves and builds correctly.
-The [build.yml](.github/workflows/build.yml) CI workflow always builds
-against the published version for this same reason, so it won't catch
-integration issues from an unpublished `src/` change either.
+
+That keeps local edits testable without a publish round-trip, and makes CI
+([build.yml](.github/workflows/build.yml)) exercise the source actually in
+the repo. Confirm it took effect — the configure step prints
+`NOTICE: Using component placed at /…/webdav for dependency
+"erikmeinders/webdav"`, and the resolved component is then named plain
+`webdav` rather than `erikmeinders__webdav`.
+
+To instead smoke-test the *published* package, drop the `override_path`
+line and `rm -rf managed_components dependencies.lock build` (a stale
+managed copy or cached build otherwise wins). Note the version range then
+has to actually match what's on the registry — a caret range on a `0.x`
+version is restrictive (`^0.1.0` will **not** accept `0.2.0`), so bumping
+the component version means bumping the example's range too.
 
 ```bash
 cd examples/littlefs_webdav

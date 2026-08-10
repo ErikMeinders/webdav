@@ -14,9 +14,10 @@
 extern "C" {
 #endif
 
-#define WEBDAV_MAX_PATH_LEN   CONFIG_ESP_WEBDAV_MAX_PATH_LEN
-#define WEBDAV_IO_BUF_SIZE    CONFIG_ESP_WEBDAV_IO_BUF_SIZE
-#define WEBDAV_MAX_PREFIX_LEN 64
+#define WEBDAV_MAX_PATH_LEN    CONFIG_ESP_WEBDAV_MAX_PATH_LEN
+#define WEBDAV_IO_BUF_SIZE     CONFIG_ESP_WEBDAV_IO_BUF_SIZE
+#define WEBDAV_MAX_PREFIX_LEN  64
+#define WEBDAV_BODY_TIMEOUT_MS (CONFIG_ESP_WEBDAV_BODY_TIMEOUT_S * 1000)
 
 struct esp_webdav_server {
     httpd_handle_t httpd;
@@ -50,6 +51,20 @@ esp_err_t webdav_resolve_path(const struct esp_webdav_server *srv, httpd_req_t *
  */
 esp_err_t webdav_resolve_uri_path(const struct esp_webdav_server *srv, const char *uri_path,
                                    char *out, size_t out_size, const char **out_rel);
+
+/*
+ * Receive request-body data like httpd_req_recv(), but bounded.
+ *
+ * esp_http_server maps a socket recv timeout (SO_RCVTIMEO, 5s by default)
+ * to HTTPD_SOCK_ERR_TIMEOUT. Retrying that is correct for a briefly stalled
+ * client, but retrying it forever wedges the single esp_http_server task and
+ * with it the entire server -- so retries stop once the client has been
+ * silent for WEBDAV_BODY_TIMEOUT_MS and HTTPD_SOCK_ERR_TIMEOUT is returned
+ * for good. Any other non-positive return is a fatal socket error, as with
+ * httpd_req_recv(). Callers should close the connection on either, since a
+ * partially-read body would otherwise be parsed as the next request.
+ */
+int webdav_recv_body(httpd_req_t *req, char *buf, size_t len);
 
 /* Percent-decode `src` (NUL-terminated) into dst (size dst_size). Returns
  * false if the result would not fit or a %XX escape is malformed. */
@@ -95,8 +110,15 @@ esp_err_t webdav_handle_lock(httpd_req_t *req);
 esp_err_t webdav_handle_unlock(httpd_req_t *req);
 
 /* Reply with a minimal plain-text error body and the given status line,
- * e.g. webdav_reply_error(req, "404 Not Found"). */
+ * e.g. webdav_reply_error(req, "404 Not Found"). Only safe once the request
+ * body has been fully read (or there wasn't one) -- otherwise use
+ * webdav_reply_error_close(). */
 esp_err_t webdav_reply_error(httpd_req_t *req, const char *status);
+
+/* Same, but closes the connection afterwards (always returns ESP_FAIL).
+ * Use for every early return that answers a request whose body has not been
+ * read, so the unread bytes can't be mis-parsed as the next request. */
+esp_err_t webdav_reply_error_close(httpd_req_t *req, const char *status);
 
 /* ---- esp_webdav_propfind.c -------------------------------------------- */
 

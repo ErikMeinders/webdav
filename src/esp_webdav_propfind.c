@@ -38,10 +38,7 @@ static esp_err_t drain_request_body(httpd_req_t *req)
     size_t remaining = req->content_len;
     while (remaining > 0) {
         size_t want = remaining < sizeof(buf) ? remaining : sizeof(buf);
-        int r = httpd_req_recv(req, buf, want);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;
-        }
+        int r = webdav_recv_body(req, buf, want);
         if (r <= 0) {
             return ESP_FAIL;
         }
@@ -173,19 +170,21 @@ esp_err_t webdav_handle_propfind(httpd_req_t *req)
     const char *rel = NULL;
     esp_err_t err = webdav_resolve_path(srv, req, path, sizeof(path), &rel);
     if (err != ESP_OK) {
-        return webdav_reply_error(req, "400 Bad Request");
+        /* Body not read yet -- close, don't leave it to desync the next
+         * request (see webdav_reply_error_close()). */
+        return webdav_reply_error_close(req, "400 Bad Request");
     }
 
     struct stat st;
     if (stat(path, &st) != 0) {
-        return webdav_reply_error(req, "404 Not Found");
+        return webdav_reply_error_close(req, "404 Not Found");
     }
 
     /* We don't parse the request body's <D:prop> selection and always return
      * the standard "allprop" set; still must drain the body so the
      * connection stays in a valid state for the response. */
     if (drain_request_body(req) != ESP_OK) {
-        return webdav_reply_error(req, "400 Bad Request");
+        return webdav_reply_error_close(req, "400 Bad Request");
     }
 
     httpd_resp_set_status(req, "207 Multi-Status");
@@ -211,23 +210,26 @@ esp_err_t webdav_handle_proppatch(httpd_req_t *req)
 {
     struct esp_webdav_server *srv = (struct esp_webdav_server *)req->user_ctx;
     if (srv->read_only) {
-        return webdav_reply_error(req, "403 Forbidden");
+        /* PROPPATCH carries an XML body we haven't read yet. */
+        return webdav_reply_error_close(req, "403 Forbidden");
     }
 
     char path[WEBDAV_MAX_PATH_LEN];
     const char *rel = NULL;
     esp_err_t err = webdav_resolve_path(srv, req, path, sizeof(path), &rel);
     if (err != ESP_OK) {
-        return webdav_reply_error(req, "400 Bad Request");
+        /* Body not read yet -- close, don't leave it to desync the next
+         * request (see webdav_reply_error_close()). */
+        return webdav_reply_error_close(req, "400 Bad Request");
     }
 
     struct stat st;
     if (stat(path, &st) != 0) {
-        return webdav_reply_error(req, "404 Not Found");
+        return webdav_reply_error_close(req, "404 Not Found");
     }
 
     if (drain_request_body(req) != ESP_OK) {
-        return webdav_reply_error(req, "400 Bad Request");
+        return webdav_reply_error_close(req, "400 Bad Request");
     }
 
     /* Dead/custom properties aren't stored anywhere on a plain filesystem;

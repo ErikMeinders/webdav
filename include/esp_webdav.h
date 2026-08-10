@@ -26,7 +26,10 @@ typedef struct {
                                      most WebDAV clients (Mountain Duck, Finder, Cyberduck all
                                      default to mounting the root of the URL). May be NULL, same as "". */
     uint16_t server_port;      /*!< TCP port for the HTTP server. Default 80. */
-    uint8_t max_clients;       /*!< Max simultaneous sockets (httpd max_open_sockets). Default 4. */
+    uint8_t max_clients;       /*!< Max simultaneous sockets (httpd max_open_sockets). Default 7.
+                                     WebDAV clients typically open several parallel connections per
+                                     mount, so setting this low makes transfers stall. esp_http_server
+                                     needs CONFIG_LWIP_MAX_SOCKETS >= max_clients + 3. */
     bool read_only;            /*!< If true, PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH/LOCK are rejected
                                      with 403 Forbidden and the server advertises itself read-only. */
 } esp_webdav_config_t;
@@ -36,7 +39,7 @@ typedef struct {
         .root_path = "/littlefs",     \
         .uri_prefix = "",             \
         .server_port = 80,            \
-        .max_clients = 4,             \
+        .max_clients = 7,             \
         .read_only = false,           \
     }
 
