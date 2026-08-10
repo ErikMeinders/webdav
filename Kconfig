@@ -35,6 +35,23 @@ menu "ESP WebDAV Server"
             nesting. Increase this further if you use a larger
             ESP_WEBDAV_MAX_PATH_LEN and deeply nested directories.
 
+    config ESP_WEBDAV_DEBUG_CONNECTIONS
+        bool "Log connecting peers and the first bytes they send"
+        default n
+        help
+            Logs the address of every accepted connection, plus a hex dump
+            of the first chunk of data received on it (later reads on the
+            same connection are not dumped, so uploads stay readable).
+
+            Meant for diagnosing clients that aren't speaking HTTP, which
+            esp_http_server otherwise reports only as
+            "parse_block: incomplete (0/N) with parser error = 16" with no
+            indication of who sent what. A leading 0x16 0x03 is a TLS
+            handshake (someone using https:// against the plain-HTTP port),
+            "PRI * HTTP/2.0" is an HTTP/2 prior-knowledge preface.
+
+            Writes request data to the log, so leave this off in production.
+
     config ESP_WEBDAV_BODY_TIMEOUT_S
         int "Request body receive timeout (seconds)"
         default 30

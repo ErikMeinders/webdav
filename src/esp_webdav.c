@@ -13,6 +13,66 @@
 
 static const char *TAG = "esp_webdav";
 
+#if CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+#define WEBDAV_DEBUG_DUMP_MAX 96
+
+/* One bit per socket, so only the *first* read on each connection is dumped
+ * -- otherwise a single upload buries the log. Indexed by fd modulo the
+ * bitmap width, which is fine for a debug aid: lwip hands out a small,
+ * dense range of descriptors. */
+static uint64_t s_debug_dumped;
+#define WEBDAV_DEBUG_BIT(fd) (1ULL << ((unsigned)(fd) % 64))
+
+static int webdav_debug_recv(httpd_handle_t hd, int sockfd, char *buf, size_t buf_len, int flags)
+{
+    (void)hd;
+    int ret = recv(sockfd, buf, buf_len, flags);
+    if (ret > 0) {
+        if (!(s_debug_dumped & WEBDAV_DEBUG_BIT(sockfd))) {
+            s_debug_dumped |= WEBDAV_DEBUG_BIT(sockfd);
+            int n = ret < WEBDAV_DEBUG_DUMP_MAX ? ret : WEBDAV_DEBUG_DUMP_MAX;
+            ESP_LOGI(TAG, "fd=%d first read: %d bytes (dumping %d)", sockfd, ret, n);
+            ESP_LOG_BUFFER_HEXDUMP(TAG, buf, n, ESP_LOG_INFO);
+        }
+        return ret;
+    }
+    if (ret < 0) {
+        /* Must mirror esp_http_server's own errno mapping exactly, or its
+         * timeout/retry handling breaks when we override recv. */
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            return HTTPD_SOCK_ERR_TIMEOUT;
+        }
+        if (errno == EINVAL || errno == EBADF || errno == EFAULT || errno == ENOTSOCK) {
+            return HTTPD_SOCK_ERR_INVALID;
+        }
+        return HTTPD_SOCK_ERR_FAIL;
+    }
+    return ret; /* 0 == peer closed */
+}
+
+static esp_err_t webdav_debug_open(httpd_handle_t hd, int sockfd)
+{
+    struct sockaddr_storage peer;
+    socklen_t len = sizeof(peer);
+    char ip[INET6_ADDRSTRLEN] = "unknown";
+
+    if (getpeername(sockfd, (struct sockaddr *)&peer, &len) == 0) {
+        if (peer.ss_family == AF_INET) {
+            inet_ntop(AF_INET, &((struct sockaddr_in *)&peer)->sin_addr, ip, sizeof(ip));
+        } else {
+            inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&peer)->sin6_addr, ip, sizeof(ip));
+        }
+    }
+    ESP_LOGI(TAG, "connection opened: fd=%d peer=%s", sockfd, ip);
+
+    s_debug_dumped &= ~WEBDAV_DEBUG_BIT(sockfd);
+    return httpd_sess_set_recv_override(hd, sockfd, webdav_debug_recv);
+}
+#endif /* CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS */
+
 esp_err_t webdav_reply_error(httpd_req_t *req, const char *status)
 {
     httpd_resp_set_status(req, status);
@@ -22,10 +82,18 @@ esp_err_t webdav_reply_error(httpd_req_t *req, const char *status)
 
 esp_err_t webdav_reply_error_close(httpd_req_t *req, const char *status)
 {
+    if (req->content_len == 0) {
+        /* No body to leave behind, so the connection is still in a clean
+         * state -- keep it alive. Tearing down a keep-alive connection for
+         * an ordinary error (a 404 probe, say) just makes clients reconnect
+         * in a loop. */
+        return webdav_reply_error(req, status);
+    }
+
     httpd_resp_set_hdr(req, "Connection", "close");
     webdav_reply_error(req, status);
     /* Returning ESP_FAIL makes esp_http_server close the socket. Required
-     * whenever we answer without having read the request body: the unread
+     * when we answer without having read the whole request body: the unread
      * bytes would otherwise be parsed as the next request on this
      * keep-alive connection, which surfaces as
      * "httpd_parse: parse_block: incomplete (0/N) with parser error = 16"
@@ -131,9 +199,14 @@ esp_err_t webdav_handle_get(httpd_req_t *req, bool send_body)
     httpd_resp_set_type(req, webdav_guess_mime_type(name));
 
     if (!send_body) {
-        char lenbuf[16];
-        snprintf(lenbuf, sizeof(lenbuf), "%ld", (long)st.st_size);
-        httpd_resp_set_hdr(req, "Content-Length", lenbuf);
+        /* Deliberately no Content-Length here, even though a HEAD response
+         * ought to carry the size the GET would return. httpd_resp_send()
+         * unconditionally writes its own "Content-Length: <buf_len>" ahead
+         * of any header set via httpd_resp_set_hdr(), so adding one would
+         * put two conflicting Content-Length values in the response -- which
+         * RFC 7230 3.3.3 makes an unrecoverable message that clients must
+         * reject. Reporting 0 is inaccurate but correctly framed, and WebDAV
+         * clients take the real size from PROPFIND's getcontentlength. */
         return httpd_resp_send(req, NULL, 0);
     }
 
@@ -360,11 +433,9 @@ esp_err_t webdav_handle_options(httpd_req_t *req)
 esp_err_t webdav_handle_lock(httpd_req_t *req)
 {
     struct esp_webdav_server *srv = (struct esp_webdav_server *)req->user_ctx;
-    if (srv->read_only) {
-        /* LOCK carries an XML body we haven't read yet. */
-        return webdav_reply_error_close(req, "403 Forbidden");
-    }
 
+    /* Drain the lock request's XML body before anything that can fail, so
+     * the error paths below can answer without dropping the connection. */
     char discard[128];
     size_t remaining = req->content_len;
     while (remaining > 0) {
@@ -374,6 +445,10 @@ esp_err_t webdav_handle_lock(httpd_req_t *req)
             return webdav_reply_error_close(req, "400 Bad Request");
         }
         remaining -= (size_t)r;
+    }
+
+    if (srv->read_only) {
+        return webdav_reply_error(req, "403 Forbidden");
     }
 
     char token[48];
@@ -499,6 +574,10 @@ esp_err_t esp_webdav_start(const esp_webdav_config_t *config, esp_webdav_handle_
      * device is rebooted. Evicting the least-recently-used connection instead
      * makes that self-healing. */
     httpd_cfg.lru_purge_enable = true;
+
+#if CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS
+    httpd_cfg.open_fn = webdav_debug_open;
+#endif
 
     esp_err_t err = httpd_start(&srv->httpd, &httpd_cfg);
     if (err != ESP_OK) {

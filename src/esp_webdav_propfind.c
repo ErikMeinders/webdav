@@ -149,6 +149,18 @@ esp_err_t webdav_handle_propfind(httpd_req_t *req)
 {
     struct esp_webdav_server *srv = (struct esp_webdav_server *)req->user_ctx;
 
+    /* Drain the body before anything that can fail. We don't parse the
+     * <D:prop> selection (we always return the standard "allprop" set), but
+     * the body still has to come off the socket or it would be mis-parsed as
+     * the next request. Doing it first means every error path below can
+     * answer normally and keep the connection -- important because a 404 here
+     * is routine, not exceptional: WebDAV clients probe constantly for files
+     * like .DS_Store and ._*, and closing on each one makes them reconnect in
+     * a tight loop. */
+    if (drain_request_body(req) != ESP_OK) {
+        return webdav_reply_error_close(req, "400 Bad Request");
+    }
+
     int depth = -1; /* infinity, the RFC 4918 default when the header is absent */
     char depth_hdr[16];
     if (httpd_req_get_hdr_value_str(req, "Depth", depth_hdr, sizeof(depth_hdr)) == ESP_OK) {
@@ -170,21 +182,12 @@ esp_err_t webdav_handle_propfind(httpd_req_t *req)
     const char *rel = NULL;
     esp_err_t err = webdav_resolve_path(srv, req, path, sizeof(path), &rel);
     if (err != ESP_OK) {
-        /* Body not read yet -- close, don't leave it to desync the next
-         * request (see webdav_reply_error_close()). */
-        return webdav_reply_error_close(req, "400 Bad Request");
+        return webdav_reply_error(req, "400 Bad Request");
     }
 
     struct stat st;
     if (stat(path, &st) != 0) {
-        return webdav_reply_error_close(req, "404 Not Found");
-    }
-
-    /* We don't parse the request body's <D:prop> selection and always return
-     * the standard "allprop" set; still must drain the body so the
-     * connection stays in a valid state for the response. */
-    if (drain_request_body(req) != ESP_OK) {
-        return webdav_reply_error_close(req, "400 Bad Request");
+        return webdav_reply_error(req, "404 Not Found");
     }
 
     httpd_resp_set_status(req, "207 Multi-Status");
@@ -209,27 +212,25 @@ esp_err_t webdav_handle_propfind(httpd_req_t *req)
 esp_err_t webdav_handle_proppatch(httpd_req_t *req)
 {
     struct esp_webdav_server *srv = (struct esp_webdav_server *)req->user_ctx;
+    /* Drain first, for the same reason as PROPFIND above. */
+    if (drain_request_body(req) != ESP_OK) {
+        return webdav_reply_error_close(req, "400 Bad Request");
+    }
+
     if (srv->read_only) {
-        /* PROPPATCH carries an XML body we haven't read yet. */
-        return webdav_reply_error_close(req, "403 Forbidden");
+        return webdav_reply_error(req, "403 Forbidden");
     }
 
     char path[WEBDAV_MAX_PATH_LEN];
     const char *rel = NULL;
     esp_err_t err = webdav_resolve_path(srv, req, path, sizeof(path), &rel);
     if (err != ESP_OK) {
-        /* Body not read yet -- close, don't leave it to desync the next
-         * request (see webdav_reply_error_close()). */
-        return webdav_reply_error_close(req, "400 Bad Request");
+        return webdav_reply_error(req, "400 Bad Request");
     }
 
     struct stat st;
     if (stat(path, &st) != 0) {
-        return webdav_reply_error_close(req, "404 Not Found");
-    }
-
-    if (drain_request_body(req) != ESP_OK) {
-        return webdav_reply_error_close(req, "400 Bad Request");
+        return webdav_reply_error(req, "404 Not Found");
     }
 
     /* Dead/custom properties aren't stored anywhere on a plain filesystem;

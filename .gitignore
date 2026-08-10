@@ -6,3 +6,4 @@ managed_components/
 dependencies.lock
 .vscode/
 .cache/
+compile_commands.json
