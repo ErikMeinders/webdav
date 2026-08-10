@@ -3,3 +3,4 @@ dependencies:
   joltwallet/littlefs: "~=1.20.0"
   espressif/mdns: "^1.0.3"
   michmich/esp-idf-wifi-provisioner: "^0.4.0"
+  erikmeinders/webdav: "^0.1.0"

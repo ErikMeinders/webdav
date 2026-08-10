@@ -15,8 +15,26 @@ is a complete flashable ESP-IDF project that consumes it.
 
 All build commands are ESP-IDF (`idf.py`) and must be run from
 `examples/littlefs_webdav` (there is nothing to build at the repo root by
-itself — it's a library component, pulled in via `EXTRA_COMPONENT_DIRS`
-pointing two levels up, see `examples/littlefs_webdav/CMakeLists.txt`):
+itself — it's a library component). The example pulls the component from
+the **published registry package** (`erikmeinders/webdav`, see
+`examples/littlefs_webdav/main/idf_component.yml`), not the local `src/` in
+this repo — `managed_components/erikmeinders__webdav/` is a separate,
+downloaded copy pinned to whatever version the manifest specifies.
+
+**This means editing `src/`/`include/` here has no effect on the example
+until you either bump-and-publish a new version, or temporarily point back
+at local source.** To test local component changes before publishing, add
+back to `examples/littlefs_webdav/CMakeLists.txt`:
+```cmake
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../..")
+```
+(and `rm -rf managed_components/erikmeinders__webdav build` first, since a
+stale managed copy or cached build otherwise wins) — then revert before
+committing, since the example is meant to also serve as an end-to-end smoke
+test that the published package actually resolves and builds correctly.
+The [build.yml](.github/workflows/build.yml) CI workflow always builds
+against the published version for this same reason, so it won't catch
+integration issues from an unpublished `src/` change either.
 
 ```bash
 cd examples/littlefs_webdav
@@ -117,6 +135,47 @@ stored-credentials fast path never starts one at all), so `esp_webdav_start()`
 binding port 80 afterwards is safe without any extra cleanup call.
 
 The example's `managed_components/` (espressif/mdns, joltwallet/littlefs,
-michmich/esp-idf-wifi-provisioner) are fetched by the IDF Component Manager
-per `examples/littlefs_webdav/main/idf_component.yml` — don't hand-edit
-files under `managed_components/`, they're regenerated.
+michmich/esp-idf-wifi-provisioner, erikmeinders/webdav) are fetched by the
+IDF Component Manager per `examples/littlefs_webdav/main/idf_component.yml`
+— don't hand-edit files under `managed_components/`, they're regenerated.
+
+## Publishing a new version
+
+Published on the [ESP Component Registry](https://components.espressif.com)
+as `erikmeinders/webdav`. Release flow:
+
+1. Bump `version:` in the root [idf_component.yml](idf_component.yml)
+   (SemVer). **A version can only ever be uploaded once and can never be
+   replaced or deleted** — always bump before pushing if you intend a real
+   release.
+2. Commit and push to `main`. [.github/workflows/release.yml](.github/workflows/release.yml)
+   (`espressif/upload-components-ci-action@v2`) publishes automatically on
+   every push to `main`. If you forget to bump the version, this job just
+   fails harmlessly (nothing gets overwritten) — no cleanup needed, just
+   bump and push again.
+3. To test without pushing/consuming a version, dispatch it manually:
+   `gh workflow run release.yml -f dry_run=true` (the workflow exposes
+   `dry_run` as a `workflow_dispatch` input specifically for this; it's
+   always `false` on the `push` trigger).
+
+**Auth is OIDC (`permissions: id-token: write`), not a stored API token** —
+matches the project convention of preferring OIDC over long-lived secrets.
+This requires one-time setup on the registry side that lives outside this
+repo and isn't visible from the code: a **trusted uploader** entry at
+`https://components.espressif.com/components/erikmeinders/webdav` (or the
+namespace-level equivalent) naming the repository, and optionally
+branch/environment/workflow filename, that's allowed to publish.
+
+If a publish fails with `ERROR: You are not authorized to perform this
+action.` against `.../api/components/erikmeinders/webdav/versions` despite
+OIDC apparently working (log shows `Using GitHub OIDC token.` right before
+the failure), **check for a case mismatch** between the trusted uploader's
+Repository field and GitHub's actual canonical casing (`gh repo view
+<owner>/<repo> --json nameWithOwner` to check) — this is what broke the
+first publish attempt: the registry UI had accepted `erikmeinders/webdav`
+(lowercase) but the real repo is `ErikMeinders/webdav`, and the comparison
+against the OIDC token's `repository` claim is case-sensitive.
+
+Started versioning at `0.1.0` rather than `1.0.0` on the first publish —
+deliberate, since it hadn't seen real-world multi-client use yet at that
+point.

@@ -48,10 +48,9 @@ dependencies:
   erikmeinders/webdav: "^0.1.0"
 ```
 
-For local development against an unpublished/modified copy, use
-`EXTRA_COMPONENT_DIRS` instead (see `examples/littlefs_webdav/CMakeLists.txt`
-for how the bundled example does this against this repo's own root), or copy
-this repo into your project's `components/` directory.
+For local development against an unpublished/modified copy, point
+`EXTRA_COMPONENT_DIRS` at a checkout of this repo instead, or copy it into
+your project's `components/` directory.
 
 Then:
 
