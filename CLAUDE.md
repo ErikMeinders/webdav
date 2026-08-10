@@ -150,9 +150,11 @@ as `erikmeinders/webdav`. Release flow:
    release.
 2. Commit and push to `main`. [.github/workflows/release.yml](.github/workflows/release.yml)
    (`espressif/upload-components-ci-action@v2`) publishes automatically on
-   every push to `main`. If you forget to bump the version, this job just
-   fails harmlessly (nothing gets overwritten) — no cleanup needed, just
-   bump and push again.
+   every push to `main`. If you forget to bump the version, this is a
+   harmless no-op, not a CI failure — the action runs `compote component
+   upload --allow-existing`, so re-uploading an already-published version
+   just succeeds without changing anything (verified: pushing a docs-only
+   commit without a version bump showed green, not red).
 3. To test without pushing/consuming a version, dispatch it manually:
    `gh workflow run release.yml -f dry_run=true` (the workflow exposes
    `dry_run` as a `workflow_dispatch` input specifically for this; it's
