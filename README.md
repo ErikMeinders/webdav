@@ -101,10 +101,21 @@ Run `idf.py menuconfig` → `ESP WebDAV Server` to adjust:
   `getcontenttype`, `getetag`, `creationdate`, `getlastmodified`). Extra
   properties in a response are harmless per RFC 4918 and every WebDAV client
   this was tested against (Finder, Mountain Duck, Cyberduck) is fine with it.
+- **Uploads from macOS Finder don't work** (downloads and browsing do).
+  Finder's built-in client (`User-Agent: WebDAVFS`) sends `PUT` with
+  `Content-Length: 0` plus `X-Expected-Entity-Length: <real size>` and then
+  streams the body anyway. `esp_http_server` believes the `Content-Length`,
+  so `httpd_req_recv()` will never return those bytes — and it has already
+  buffered the front of the body into a private scratch buffer, so reading
+  the socket directly can't recover them either. Such uploads are refused
+  with `411 Length Required` rather than silently producing an empty file.
+  Use Mountain Duck, Cyberduck, or `curl -T`, which all send a real
+  `Content-Length`.
 - Designed for a handful of concurrent clients on an embedded device, not as
-  a general-purpose file server — there's no byte-range `GET` support, no
-  chunked-`PUT` support (requires `Content-Length`), and directory listings
-  are not paginated.
+  a general-purpose file server — there's no byte-range `GET` support (so
+  macOS QuickLook previews and resumable downloads fail), no chunked-`PUT`
+  support (requires `Content-Length`), and directory listings are not
+  paginated.
 
 ## License
 

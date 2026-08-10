@@ -17,25 +17,57 @@ static const char *TAG = "esp_webdav";
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
-#define WEBDAV_DEBUG_DUMP_MAX 96
+/* Large enough for a full WebDAV request header block -- clients send long
+ * URIs plus Host/User-Agent/Content-Length/Depth, and a truncated dump hides
+ * exactly the headers you need (Content-Length, Transfer-Encoding,
+ * X-Expected-Entity-Length). */
+#define WEBDAV_DEBUG_DUMP_MAX 320
 
-/* One bit per socket, so only the *first* read on each connection is dumped
- * -- otherwise a single upload buries the log. Indexed by fd modulo the
- * bitmap width, which is fine for a debug aid: lwip hands out a small,
- * dense range of descriptors. */
-static uint64_t s_debug_dumped;
-#define WEBDAV_DEBUG_BIT(fd) (1ULL << ((unsigned)(fd) % 64))
+/* esp_http_server parses in 128-byte blocks, so one read never covers a whole
+ * WebDAV header block. Dump the first few reads of each connection instead of
+ * just the first -- enough to see every header -- while still stopping well
+ * before an upload body buries the log. Indexed by fd modulo the table size,
+ * which is fine for a debug aid: lwip hands out a small, dense fd range. */
+#define WEBDAV_DEBUG_SLOTS       64
+#define WEBDAV_DEBUG_READS_SHOWN 3
+static uint8_t s_debug_reads[WEBDAV_DEBUG_SLOTS];
+#define WEBDAV_DEBUG_SLOT(fd) ((unsigned)(fd) % WEBDAV_DEBUG_SLOTS)
+
+/* Budget for "this doesn't start like an HTTP request" dumps, so that a
+ * binary upload (whose body reads also come through here) can't flood the
+ * log while still catching a bad request on a *reused* connection, which the
+ * first-read dump alone would miss. */
+static int s_debug_odd_budget = 10;
+
+/* First byte of every method in http_parser's table. */
+static bool webdav_debug_starts_like_method(const char *buf, int len)
+{
+    return len > 0 && buf[0] != '\0' && strchr("ABCDGHLMNOPRSTU", buf[0]) != NULL;
+}
 
 static int webdav_debug_recv(httpd_handle_t hd, int sockfd, char *buf, size_t buf_len, int flags)
 {
     (void)hd;
     int ret = recv(sockfd, buf, buf_len, flags);
     if (ret > 0) {
-        if (!(s_debug_dumped & WEBDAV_DEBUG_BIT(sockfd))) {
-            s_debug_dumped |= WEBDAV_DEBUG_BIT(sockfd);
+        unsigned slot = WEBDAV_DEBUG_SLOT(sockfd);
+        bool early = s_debug_reads[slot] < WEBDAV_DEBUG_READS_SHOWN;
+        /* Also dump a read that doesn't begin like an HTTP request even after
+         * the early ones, which is how a desynced keep-alive connection shows
+         * up -- the first-reads window alone would miss it. Budgeted so a
+         * binary upload body can't flood the log. */
+        bool odd = !early && !webdav_debug_starts_like_method(buf, ret) && s_debug_odd_budget > 0;
+        if (early || odd) {
+            if (odd) {
+                s_debug_odd_budget--;
+            }
             int n = ret < WEBDAV_DEBUG_DUMP_MAX ? ret : WEBDAV_DEBUG_DUMP_MAX;
-            ESP_LOGI(TAG, "fd=%d first read: %d bytes (dumping %d)", sockfd, ret, n);
+            ESP_LOGI(TAG, "fd=%d read #%u%s: %d bytes (dumping %d)", sockfd,
+                     (unsigned)s_debug_reads[slot] + 1, odd ? " NON-HTTP" : "", ret, n);
             ESP_LOG_BUFFER_HEXDUMP(TAG, buf, n, ESP_LOG_INFO);
+        }
+        if (s_debug_reads[slot] < 255) {
+            s_debug_reads[slot]++;
         }
         return ret;
     }
@@ -68,7 +100,7 @@ static esp_err_t webdav_debug_open(httpd_handle_t hd, int sockfd)
     }
     ESP_LOGI(TAG, "connection opened: fd=%d peer=%s", sockfd, ip);
 
-    s_debug_dumped &= ~WEBDAV_DEBUG_BIT(sockfd);
+    s_debug_reads[WEBDAV_DEBUG_SLOT(sockfd)] = 0;
     return httpd_sess_set_recv_override(hd, sockfd, webdav_debug_recv);
 }
 #endif /* CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS */
@@ -279,6 +311,31 @@ esp_err_t webdav_handle_put(httpd_req_t *req)
         /* Chunked, or neither Content-Length nor chunked -- either way we
          * can't reliably read the body. */
         return webdav_reply_error_close(req, "411 Length Required");
+    }
+
+    /* macOS's built-in WebDAV client (User-Agent: WebDAVFS) announces an
+     * upload as "Content-Length: 0" plus "X-Expected-Entity-Length: <real
+     * size>", and then sends the body anyway. esp_http_server believes the
+     * Content-Length, so httpd_req_recv() hands us nothing (it clamps reads
+     * to remaining_len, which is 0) while the body piles up on the socket.
+     *
+     * Treating that as a normal empty PUT is the worst outcome: it creates a
+     * 0-byte file, answers 201 Created, and leaves the body to be parsed as
+     * the next request -- which is where "parse_block: incomplete (0/N) with
+     * parser error = 16" comes from, and why files land empty. We can't read
+     * the body either (esp_http_server has already buffered the front of it
+     * into a private scratch buffer), so refuse the upload and close. */
+    char xlen[24];
+    if (req->content_len == 0 &&
+        httpd_req_get_hdr_value_str(req, "X-Expected-Entity-Length", xlen, sizeof(xlen)) == ESP_OK &&
+        strtoul(xlen, NULL, 10) > 0) {
+        ESP_LOGW(TAG, "PUT %s: macOS-style upload (Content-Length: 0 with "
+                      "X-Expected-Entity-Length: %s) cannot be read -- refusing",
+                 req->uri, xlen);
+        httpd_resp_set_hdr(req, "Connection", "close");
+        webdav_reply_error(req, "411 Length Required");
+        return ESP_FAIL; /* force close: content_len is 0, so the usual
+                          * content_len>0 test wouldn't trigger one */
     }
 
     char path[WEBDAV_MAX_PATH_LEN];
