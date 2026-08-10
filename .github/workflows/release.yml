@@ -1,0 +1,26 @@
+name: Upload component
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Validate only, don't actually upload"
+        type: boolean
+        default: false
+
+jobs:
+  upload_components:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload component to the component registry
+        uses: espressif/upload-components-ci-action@v2
+        with:
+          components: "webdav: ."
+          namespace: "erikmeinders"
+          dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}

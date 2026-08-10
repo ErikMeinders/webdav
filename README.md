@@ -38,14 +38,14 @@ Cyberduck), Windows (Explorer), or Linux (GVfs/`davfs2`).
 Add it as a dependency via the [ESP Component Registry](https://components.espressif.com/components/erikmeinders/webdav):
 
 ```sh
-idf.py add-dependency "erikmeinders/webdav^1.0.0"
+idf.py add-dependency "erikmeinders/webdav^0.1.0"
 ```
 
 or add it to your project's `idf_component.yml` directly:
 
 ```yaml
 dependencies:
-  erikmeinders/webdav: "^1.0.0"
+  erikmeinders/webdav: "^0.1.0"
 ```
 
 For local development against an unpublished/modified copy, use
