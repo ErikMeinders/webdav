@@ -1,0 +1,4 @@
+This file lives on the ESP32's LittleFS partition and is served over WebDAV.
+
+Try editing and saving it from your WebDAV client (e.g. Mountain Duck on
+macOS) - the change is written straight to flash on the device.

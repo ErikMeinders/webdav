@@ -1,0 +1,23 @@
+name: Build example
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s3, esp32c6]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build littlefs_webdav example (${{ matrix.target }})
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3
+          target: ${{ matrix.target }}
+          path: examples/littlefs_webdav

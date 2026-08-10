@@ -1,0 +1,49 @@
+menu "ESP WebDAV Server"
+
+    config ESP_WEBDAV_MAX_PATH_LEN
+        int "Maximum resolved filesystem path length"
+        default 600
+        range 128 2048
+        help
+            Size of the stack buffer used to build the full filesystem path
+            (root_path + decoded, sanitized URI) for every request. Requests
+            that would resolve to a longer path are rejected with
+            414 URI Too Long. Increase this if you use deeply nested
+            directories or long file names.
+
+    config ESP_WEBDAV_IO_BUF_SIZE
+        int "File I/O chunk size"
+        default 4096
+        range 512 16384
+        help
+            Size of the buffer used to stream file contents for GET/PUT and
+            for COPY. Larger values are faster but use more stack/heap per
+            request.
+
+    config ESP_WEBDAV_HTTPD_STACK_SIZE
+        int "HTTP server task stack size"
+        default 8192
+        range 4096 32768
+        help
+            Stack size for the esp_http_server worker task that runs every
+            WebDAV handler. Recursive operations (PROPFIND with
+            "Depth: infinity", COPY/DELETE on a directory tree) put one
+            ESP_WEBDAV_MAX_PATH_LEN-sized path buffer (or two, for COPY) on
+            the stack per directory level, on top of esp_http_server's own
+            usage -- the default esp_http_server stack size (4096) is not
+            enough headroom for that plus more than one or two levels of
+            nesting. Increase this further if you use a larger
+            ESP_WEBDAV_MAX_PATH_LEN and deeply nested directories.
+
+    config ESP_WEBDAV_ALLOW_DEPTH_INFINITY
+        bool "Allow 'Depth: infinity' on PROPFIND"
+        default y
+        help
+            RFC 4918 lets a PROPFIND request recursively list an entire
+            subtree with a single "Depth: infinity" header. On a
+            flash-backed filesystem with many files this can take a while
+            and hold the response chunked-transfer open for a long time.
+            Disabling this makes the server treat "Depth: infinity" the
+            same as "Depth: 1" (children only, no grandchildren).
+
+endmenu

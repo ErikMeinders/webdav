@@ -1,0 +1,15 @@
+# Custom partition table with an app slot + a "storage" LittleFS partition
+# sized for a 4MB flash chip (the common default on ESP32 dev boards).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# WebDAV clients (Mountain Duck, Finder, Cyberduck) can send long Destination
+# headers (MOVE/COPY) and deep paths -- give the HTTP server more headroom
+# than the IDF defaults.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1536
+CONFIG_HTTPD_MAX_URI_LEN=768
+
+# Enough open sockets for a couple of simultaneous WebDAV client connections
+# (most clients open more than one TCP connection per mount).
+CONFIG_LWIP_MAX_SOCKETS=10
