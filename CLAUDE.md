@@ -21,7 +21,7 @@ builds **this repo's `src/`** rather than a downloaded copy:
 
 ```yaml
   erikmeinders/webdav:
-    version: "^0.2.0"
+    version: "^0.2.1"
     override_path: "../../../"
 ```
 
@@ -184,14 +184,34 @@ as `erikmeinders/webdav`. Release flow:
    (SemVer). **A version can only ever be uploaded once and can never be
    replaced or deleted** — always bump before pushing if you intend a real
    release.
-2. Commit and push to `main`. [.github/workflows/release.yml](.github/workflows/release.yml)
+2. Move the `Unreleased` entries in [CHANGELOG.md](CHANGELOG.md) under the new
+   version heading. The registry publishes a root `CHANGELOG.md` alongside the
+   README (one inside an example directory is ignored).
+3. Bump the version range the README documents (two spots: the
+   `idf.py add-dependency` line and the `idf_component.yml` snippet) and the
+   one in [examples/littlefs_webdav/main/idf_component.yml](examples/littlefs_webdav/main/idf_component.yml).
+   A caret range on a `0.x` version only widens to the next minor, so these
+   go stale silently.
+4. Inspect the archive before pushing — `compote component pack --name webdav
+   --version <x.y.z>` writes `dist/webdav_<x.y.z>.tgz`; `tar tzf` it. `compote`
+   packs from the **working tree, not from git**, so anything untracked and
+   not named in the manifest's `files.exclude` ships. A clean archive is ~30
+   entries: `src/`, `include/`, `Kconfig`, `CMakeLists.txt`, `LICENSE`,
+   `README.md`, `CHANGELOG.md`, `idf_component.yml`, and `examples/`.
+5. Commit and push to `main`. [.github/workflows/release.yml](.github/workflows/release.yml)
    (`espressif/upload-components-ci-action@v2`) publishes automatically on
    every push to `main`. If you forget to bump the version, this is a
    harmless no-op, not a CI failure — the action runs `compote component
    upload --allow-existing`, so re-uploading an already-published version
    just succeeds without changing anything (verified: pushing a docs-only
    commit without a version bump showed green, not red).
-3. To test without pushing/consuming a version, dispatch it manually:
+6. Tag the release commit `vX.Y.Z` (annotated) and push the tag. The registry
+   keeps no link back to a commit, so without this there is no way to check
+   out what a published version contained. The rule is *tag the commit that
+   declares the version in `idf_component.yml`* — later commits that push
+   without a bump re-upload as a no-op and do not change the published
+   archive. Tags are not what triggers publishing; the push to `main` is.
+7. To test without pushing/consuming a version, dispatch it manually:
    `gh workflow run release.yml -f dry_run=true` (the workflow exposes
    `dry_run` as a `workflow_dispatch` input specifically for this; it's
    always `false` on the `push` trigger).

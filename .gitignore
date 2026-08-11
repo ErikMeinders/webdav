@@ -7,3 +7,5 @@ dependencies.lock
 .vscode/
 .cache/
 compile_commands.json
+dist/
+.envrc

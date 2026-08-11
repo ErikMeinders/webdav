@@ -4,5 +4,5 @@ dependencies:
   espressif/mdns: "^1.0.3"
   michmich/esp-idf-wifi-provisioner: "^0.4.0"
   erikmeinders/webdav:
-    version: "^0.2.0"
+    version: "^0.2.1"
     override_path: "../../../"

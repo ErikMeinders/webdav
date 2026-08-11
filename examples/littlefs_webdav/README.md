@@ -74,6 +74,11 @@ flash over WebDAV PUT/DELETE/MKCOL/MOVE/COPY.
 
 ## Notes
 
+- The device advertises itself over mDNS as `esp32-webdav.local` with three
+  records: `_webdav._tcp` and `_http._tcp` (both carrying `path=/`), plus a
+  TXT-only `_device-info._tcp` on port 0 with `model=Xserve`. That last one
+  is what makes macOS draw a server icon for the share in Finder's Network
+  view instead of a generic box; nothing ever connects to it.
 - No authentication is configured — anyone on the network who can reach the
   device can read/write its filesystem. Fine for a LAN demo; put it behind a
   VPN, an `esp_https_server`/reverse-proxy with auth, or a closed

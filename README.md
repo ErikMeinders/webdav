@@ -48,14 +48,14 @@ Cyberduck), Windows (Explorer), or Linux (GVfs/`davfs2`).
 Add it as a dependency via the [ESP Component Registry](https://components.espressif.com/components/erikmeinders/webdav):
 
 ```sh
-idf.py add-dependency "erikmeinders/webdav^0.2.0"
+idf.py add-dependency "erikmeinders/webdav^0.2.1"
 ```
 
 or add it to your project's `idf_component.yml` directly:
 
 ```yaml
 dependencies:
-  erikmeinders/webdav: "^0.2.0"
+  erikmeinders/webdav: "^0.2.1"
 ```
 
 For local development against an unpublished/modified copy, point
@@ -133,6 +133,10 @@ Run `idf.py menuconfig` → `ESP WebDAV Server` to adjust:
   `X-Expected-Entity-Length` (see below); any other chunked upload is
   refused with `411 Length Required`, since `esp_http_server` cannot report
   a length for it.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## License
 

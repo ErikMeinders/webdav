@@ -1,18 +1,34 @@
-version: "0.2.0"
+version: "0.2.1"
 description: WebDAV server component (built on esp_http_server) for exposing a mounted filesystem such as LittleFS to WebDAV clients (Finder, Mountain Duck, Cyberduck, Windows Explorer).
 url: https://github.com/ErikMeinders/webdav
 repository: https://github.com/ErikMeinders/webdav.git
 documentation: https://github.com/ErikMeinders/webdav#readme
 issues: https://github.com/ErikMeinders/webdav/issues
 license: MIT
+maintainers:
+  - Erik Meinders <erik@easytocloud.com>
 tags:
   - webdav
   - http
   - filesystem
   - littlefs
   - networking
+# Only what the default exclusion list misses. It already drops build/,
+# managed_components/, sdkconfig, dependencies.lock, .github/, .vscode/ and
+# .DS_Store, so those don't need repeating here.
+files:
+  exclude:
+    - "CLAUDE.md"       # agent instructions; no value to a consumer
+    - ".gitignore"
+    - "**/.clangd"      # editor config, incl. the example's
+    - "*.code-workspace"
+    - "**/.cache/**/*"  # clangd index
+    - "**/.claude/**/*"
+    - ".envrc"          # local direnv config; compote packs from the working
+                        # tree, not from git, so gitignoring it is not enough
+    - "**/compile_commands.json"  # a symlink into the excluded build/
 dependencies:
   idf:
     version: ">=5.0"
-examples:
-  - path: ./examples/littlefs_webdav
+# No `examples:` key needed -- the registry scans examples/ recursively, and
+# listing a path that is already under it risks a collision rename.
