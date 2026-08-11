@@ -50,7 +50,10 @@ menu "ESP WebDAV Server"
             handshake (someone using https:// against the plain-HTTP port),
             "PRI * HTTP/2.0" is an HTTP/2 prior-knowledge preface.
 
-            Writes request data to the log, so leave this off in production.
+            Writes request data to the log, including any Authorization
+            header the client sends (Mountain Duck sends Basic credentials
+            even when the server asks for none), so leave this off in
+            production and scrub captured logs before sharing them.
 
     config ESP_WEBDAV_BODY_TIMEOUT_S
         int "Request body receive timeout (seconds)"

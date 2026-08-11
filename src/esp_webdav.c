@@ -186,6 +186,151 @@ static esp_err_t send_directory_listing(httpd_req_t *req, const char *fs_path)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+/*
+ * Parse a "Range: bytes=..." header against a file of `size` bytes.
+ *
+ * Returns false when there is no usable Range header, i.e. the caller should
+ * send the whole file with 200. Returns true otherwise, with either
+ * "unsatisfiable" set (caller sends 416), or out_start and out_end holding an
+ * inclusive, clamped byte range.
+ */
+static bool parse_range_header(httpd_req_t *req, long size, long *out_start, long *out_end,
+                                bool *unsatisfiable)
+{
+    *unsatisfiable = false;
+
+    char hdr[64];
+    if (httpd_req_get_hdr_value_str(req, "Range", hdr, sizeof(hdr)) != ESP_OK) {
+        return false;
+    }
+    if (strncasecmp(hdr, "bytes=", 6) != 0) {
+        return false; /* "bytes" is the only range unit anyone actually uses */
+    }
+    const char *spec = hdr + 6;
+    if (strchr(spec, ',') != NULL) {
+        /* Multiple ranges. RFC 7233 explicitly lets a server ignore Range and
+         * return the whole entity, which beats assembling a
+         * multipart/byteranges response on a microcontroller. */
+        return false;
+    }
+    const char *dash = strchr(spec, '-');
+    if (dash == NULL) {
+        return false;
+    }
+
+    long start, end;
+    if (dash == spec) {
+        /* "-N": the last N bytes. */
+        long n = strtol(dash + 1, NULL, 10);
+        if (n <= 0) {
+            *unsatisfiable = true;
+            return true;
+        }
+        if (n > size) {
+            n = size;
+        }
+        start = size - n;
+        end = size - 1;
+    } else {
+        start = strtol(spec, NULL, 10);
+        end = (dash[1] == '\0') ? size - 1 : strtol(dash + 1, NULL, 10);
+    }
+
+    if (start < 0 || start >= size || end < start) {
+        *unsatisfiable = true;
+        return true;
+    }
+    if (end >= size) {
+        end = size - 1; /* a too-large end is clamped, not an error */
+    }
+    *out_start = start;
+    *out_end = end;
+    return true;
+}
+
+/* httpd_send() may send less than asked; loop until it's all out. Socket
+ * timeouts are retried on the same bounded basis as webdav_recv_body(), so a
+ * client that stops reading can't pin the single server task forever. */
+static esp_err_t raw_send_all(httpd_req_t *req, const char *buf, size_t len)
+{
+    size_t off = 0;
+    int timeouts = 0;
+    const int max_timeouts = (WEBDAV_BODY_TIMEOUT_MS / 5000) + 1;
+
+    while (off < len) {
+        int r = httpd_send(req, buf + off, len - off);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > max_timeouts) {
+                return ESP_ERR_TIMEOUT;
+            }
+            continue;
+        }
+        if (r <= 0) {
+            return ESP_FAIL;
+        }
+        timeouts = 0;
+        off += (size_t)r;
+    }
+    return ESP_OK;
+}
+
+/*
+ * Answer with 206 Partial Content for [start, end].
+ *
+ * Built with httpd_send() rather than httpd_resp_send*(): a partial response
+ * needs an exact Content-Length alongside Content-Range, and
+ * httpd_resp_send() would only give that by buffering the whole range in
+ * RAM, while httpd_resp_send_chunk() would force Transfer-Encoding: chunked.
+ */
+static esp_err_t send_file_range(httpd_req_t *req, FILE *f, const char *mime, long start,
+                                  long end, long size)
+{
+    long len = end - start + 1;
+
+    char hdr[224];
+    int n = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 206 Partial Content\r\n"
+                      "Content-Type: %s\r\n"
+                      "Content-Length: %ld\r\n"
+                      "Content-Range: bytes %ld-%ld/%ld\r\n"
+                      "Accept-Ranges: bytes\r\n"
+                      "\r\n",
+                      mime, len, start, end, size);
+    if (n < 0 || (size_t)n >= sizeof(hdr)) {
+        return ESP_FAIL;
+    }
+    esp_err_t err = raw_send_all(req, hdr, (size_t)n);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (fseek(f, start, SEEK_SET) != 0) {
+        return ESP_FAIL; /* headers are already out; all we can do is drop it */
+    }
+
+    char *buf = malloc(WEBDAV_IO_BUF_SIZE);
+    if (!buf) {
+        return ESP_FAIL;
+    }
+
+    long remaining = len;
+    while (remaining > 0) {
+        size_t want = (remaining < WEBDAV_IO_BUF_SIZE) ? (size_t)remaining : WEBDAV_IO_BUF_SIZE;
+        size_t got = fread(buf, 1, want, f);
+        if (got == 0) {
+            err = ESP_FAIL; /* file shrank under us */
+            break;
+        }
+        err = raw_send_all(req, buf, got);
+        if (err != ESP_OK) {
+            break;
+        }
+        remaining -= (long)got;
+    }
+    free(buf);
+    return err;
+}
+
 esp_err_t webdav_handle_get(httpd_req_t *req, bool send_body)
 {
     struct esp_webdav_server *srv = (struct esp_webdav_server *)req->user_ctx;
@@ -228,7 +373,9 @@ esp_err_t webdav_handle_get(httpd_req_t *req, bool send_body)
         name = strrchr(rel, '/');
         name = name ? name + 1 : rel;
     }
-    httpd_resp_set_type(req, webdav_guess_mime_type(name));
+    const char *mime = webdav_guess_mime_type(name);
+    httpd_resp_set_type(req, mime);
+    httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
 
     if (!send_body) {
         /* Deliberately no Content-Length here, even though a HEAD response
@@ -245,6 +392,27 @@ esp_err_t webdav_handle_get(httpd_req_t *req, bool send_body)
     FILE *f = fopen(path, "rb");
     if (!f) {
         return webdav_reply_error(req, "404 Not Found");
+    }
+
+    /* macOS's WebDAV client reads files in ranges rather than whole -- without
+     * this it gets the entire file for each 32 KB it asked for, then resets
+     * the connection, which is both very slow and a failed read. */
+    long fsize = (long)st.st_size;
+    long rstart = 0, rend = 0;
+    bool unsatisfiable = false;
+    if (parse_range_header(req, fsize, &rstart, &rend, &unsatisfiable)) {
+        if (unsatisfiable) {
+            fclose(f);
+            /* cr must outlive the send: httpd_resp_set_hdr() stores the
+             * pointer, and webdav_reply_error() sends while it's in scope. */
+            char cr[48];
+            snprintf(cr, sizeof(cr), "bytes */%ld", fsize);
+            httpd_resp_set_hdr(req, "Content-Range", cr);
+            return webdav_reply_error(req, "416 Range Not Satisfiable");
+        }
+        esp_err_t range_err = send_file_range(req, f, mime, rstart, rend, fsize);
+        fclose(f);
+        return range_err;
     }
 
     char *buf = malloc(WEBDAV_IO_BUF_SIZE);

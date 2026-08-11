@@ -11,6 +11,9 @@ Cyberduck), Windows (Explorer), or Linux (GVfs/`davfs2`).
   `index.html` if present, otherwise renders a plain HTML index — for a
   regular web browser; WebDAV clients list directories via `PROPFIND`
   instead and are unaffected either way)
+- Byte-range `GET` (`206 Partial Content`) — needed by macOS, which reads
+  files in ~32 KB ranges rather than whole; also what makes resumable
+  downloads and media seeking work
 - `PUT` — upload/overwrite files, streamed to flash in chunks (no
   whole-file buffering)
 - `DELETE` — recursive delete of files and directories
@@ -112,10 +115,10 @@ Run `idf.py menuconfig` → `ESP WebDAV Server` to adjust:
   Use Mountain Duck, Cyberduck, or `curl -T`, which all send a real
   `Content-Length`.
 - Designed for a handful of concurrent clients on an embedded device, not as
-  a general-purpose file server — there's no byte-range `GET` support (so
-  macOS QuickLook previews and resumable downloads fail), no chunked-`PUT`
-  support (requires `Content-Length`), and directory listings are not
-  paginated.
+  a general-purpose file server — no chunked-`PUT` support (requires
+  `Content-Length`), and directory listings are not paginated. Byte-range
+  `GET` handles a single range per request; a multi-range request is answered
+  with the whole entity, which RFC 7233 permits.
 
 ## License
 
