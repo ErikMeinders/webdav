@@ -4,6 +4,7 @@ idf_component_register(
         "src/esp_webdav_propfind.c"
         "src/esp_webdav_copy_move.c"
         "src/esp_webdav_util.c"
+        "src/esp_webdav_macos_put.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "src"
     REQUIRES esp_http_server

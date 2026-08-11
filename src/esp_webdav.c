@@ -53,8 +53,10 @@ static bool webdav_debug_starts_like_method(const char *buf, int len)
 
 static int webdav_debug_recv(httpd_handle_t hd, int sockfd, char *buf, size_t buf_len, int flags)
 {
-    (void)hd;
-    int ret = recv(sockfd, buf, buf_len, flags);
+    /* Chained through the macOS shim, so what gets dumped is the stream
+     * esp_http_server actually parses -- i.e. after a chunked Finder upload
+     * has been rewritten and de-chunked, not the raw bytes on the wire. */
+    int ret = webdav_macos_put_recv(hd, sockfd, buf, buf_len, flags);
     if (ret > 0) {
         unsigned slot = WEBDAV_DEBUG_SLOT(sockfd);
         bool early = s_debug_reads[slot] < WEBDAV_DEBUG_READS_SHOWN;
@@ -77,18 +79,7 @@ static int webdav_debug_recv(httpd_handle_t hd, int sockfd, char *buf, size_t bu
         }
         return ret;
     }
-    if (ret < 0) {
-        /* Must mirror esp_http_server's own errno mapping exactly, or its
-         * timeout/retry handling breaks when we override recv. */
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-            return HTTPD_SOCK_ERR_TIMEOUT;
-        }
-        if (errno == EINVAL || errno == EBADF || errno == EFAULT || errno == ENOTSOCK) {
-            return HTTPD_SOCK_ERR_INVALID;
-        }
-        return HTTPD_SOCK_ERR_FAIL;
-    }
-    return ret; /* 0 == peer closed */
+    return ret; /* already an HTTPD_SOCK_ERR_* code, or 0 == peer closed */
 }
 
 static int webdav_debug_send(httpd_handle_t hd, int sockfd, const char *buf, size_t buf_len,
@@ -156,12 +147,27 @@ static esp_err_t webdav_socket_open(httpd_handle_t hd, int sockfd)
         ESP_LOGW(TAG, "TCP_NODELAY failed on fd=%d: errno=%d", sockfd, errno);
     }
 
+    /* Rewrite macOS Finder's chunked uploads into ordinary Content-Length
+     * PUTs before esp_http_server parses them. Transparent otherwise.
+     *
+     * Clear any state left over on this descriptor first: the shim keys per
+     * connection state by fd, and fds get recycled quickly. Relying solely on
+     * close_fn to have cleaned up would mean a missed cleanup silently
+     * applying one connection's state to the next. */
+    webdav_macos_put_forget(sockfd);
 #if CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS
-    webdav_debug_attach(hd, sockfd);
+    webdav_debug_attach(hd, sockfd); /* its recv chains through the shim */
 #else
-    (void)hd;
+    httpd_sess_set_recv_override(hd, sockfd, webdav_macos_put_recv);
 #endif
     return ESP_OK;
+}
+
+static void webdav_socket_close(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+    webdav_macos_put_forget(sockfd);
+    close(sockfd);
 }
 
 esp_err_t webdav_reply_error(httpd_req_t *req, const char *status)
@@ -863,6 +869,7 @@ esp_err_t esp_webdav_start(const esp_webdav_config_t *config, esp_webdav_handle_
      * makes that self-healing. */
     httpd_cfg.lru_purge_enable = true;
     httpd_cfg.open_fn = webdav_socket_open;
+    httpd_cfg.close_fn = webdav_socket_close;
 
     esp_err_t err = httpd_start(&srv->httpd, &httpd_cfg);
     if (err != ESP_OK) {

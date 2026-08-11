@@ -66,6 +66,19 @@ esp_err_t webdav_resolve_uri_path(const struct esp_webdav_server *srv, const cha
  */
 int webdav_recv_body(httpd_req_t *req, char *buf, size_t len);
 
+/* ---- esp_webdav_macos_put.c ------------------------------------------- */
+
+/*
+ * Session recv override that turns macOS Finder's chunked upload into an
+ * ordinary Content-Length PUT before esp_http_server ever parses it (see the
+ * comment at the top of esp_webdav_macos_put.c). Transparent to every other
+ * request. Install with httpd_sess_set_recv_override(); call
+ * webdav_macos_put_forget() when the socket closes so the per-connection
+ * state is released.
+ */
+int webdav_macos_put_recv(httpd_handle_t hd, int sockfd, char *buf, size_t buf_len, int flags);
+void webdav_macos_put_forget(int fd);
+
 /* Percent-decode `src` (NUL-terminated) into dst (size dst_size). Returns
  * false if the result would not fit or a %XX escape is malformed. */
 bool webdav_url_decode(const char *src, char *dst, size_t dst_size);
