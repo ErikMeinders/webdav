@@ -1,9 +1,12 @@
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -14,8 +17,6 @@
 static const char *TAG = "esp_webdav";
 
 #if CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS
-#include <arpa/inet.h>
-#include <sys/socket.h>
 
 /* Large enough for a full WebDAV request header block -- clients send long
  * URIs plus Host/User-Agent/Content-Length/Depth, and a truncated dump hides
@@ -30,7 +31,11 @@ static const char *TAG = "esp_webdav";
  * which is fine for a debug aid: lwip hands out a small, dense fd range. */
 #define WEBDAV_DEBUG_SLOTS       64
 #define WEBDAV_DEBUG_READS_SHOWN 3
+/* Responses are worth more dumps than requests: PROPFIND emits its XML as
+ * many small chunks, so the interesting part is spread over several writes. */
+#define WEBDAV_DEBUG_SENDS_SHOWN 10
 static uint8_t s_debug_reads[WEBDAV_DEBUG_SLOTS];
+static uint8_t s_debug_sends[WEBDAV_DEBUG_SLOTS];
 #define WEBDAV_DEBUG_SLOT(fd) ((unsigned)(fd) % WEBDAV_DEBUG_SLOTS)
 
 /* Budget for "this doesn't start like an HTTP request" dumps, so that a
@@ -85,7 +90,37 @@ static int webdav_debug_recv(httpd_handle_t hd, int sockfd, char *buf, size_t bu
     return ret; /* 0 == peer closed */
 }
 
-static esp_err_t webdav_debug_open(httpd_handle_t hd, int sockfd)
+static int webdav_debug_send(httpd_handle_t hd, int sockfd, const char *buf, size_t buf_len,
+                             int flags)
+{
+    (void)hd;
+    unsigned slot = WEBDAV_DEBUG_SLOT(sockfd);
+    if (s_debug_sends[slot] < WEBDAV_DEBUG_SENDS_SHOWN) {
+        int n = buf_len < WEBDAV_DEBUG_DUMP_MAX ? (int)buf_len : WEBDAV_DEBUG_DUMP_MAX;
+        ESP_LOGI(TAG, "fd=%d SEND #%u: %u bytes (dumping %d)", sockfd,
+                 (unsigned)s_debug_sends[slot] + 1, (unsigned)buf_len, n);
+        ESP_LOG_BUFFER_HEXDUMP(TAG, buf, n, ESP_LOG_INFO);
+    }
+    if (s_debug_sends[slot] < 255) {
+        s_debug_sends[slot]++;
+    }
+
+    int ret = send(sockfd, buf, buf_len, flags);
+    if (ret < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            return HTTPD_SOCK_ERR_TIMEOUT;
+        }
+        if (errno == EINVAL || errno == EBADF || errno == EFAULT || errno == ENOTSOCK) {
+            return HTTPD_SOCK_ERR_INVALID;
+        }
+        ESP_LOGW(TAG, "fd=%d send failed after %u writes: errno=%d", sockfd,
+                 (unsigned)s_debug_sends[slot], errno);
+        return HTTPD_SOCK_ERR_FAIL;
+    }
+    return ret;
+}
+
+static void webdav_debug_attach(httpd_handle_t hd, int sockfd)
 {
     struct sockaddr_storage peer;
     socklen_t len = sizeof(peer);
@@ -101,9 +136,32 @@ static esp_err_t webdav_debug_open(httpd_handle_t hd, int sockfd)
     ESP_LOGI(TAG, "connection opened: fd=%d peer=%s", sockfd, ip);
 
     s_debug_reads[WEBDAV_DEBUG_SLOT(sockfd)] = 0;
-    return httpd_sess_set_recv_override(hd, sockfd, webdav_debug_recv);
+    s_debug_sends[WEBDAV_DEBUG_SLOT(sockfd)] = 0;
+    httpd_sess_set_recv_override(hd, sockfd, webdav_debug_recv);
+    httpd_sess_set_send_override(hd, sockfd, webdav_debug_send);
 }
 #endif /* CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS */
+
+static esp_err_t webdav_socket_open(httpd_handle_t hd, int sockfd)
+{
+    /* PROPFIND streams its XML as many small chunks, and every chunk is
+     * several send() calls (size line, payload, CRLF), so a directory listing
+     * can be hundreds of tiny writes. With Nagle enabled the stack holds each
+     * one back waiting for an ACK, adding up to ~40ms apiece -- enough that
+     * clients time out mid-response and reset the connection. These responses
+     * are latency-sensitive and small, so disable it. */
+    int one = 1;
+    if (setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+        ESP_LOGW(TAG, "TCP_NODELAY failed on fd=%d: errno=%d", sockfd, errno);
+    }
+
+#if CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS
+    webdav_debug_attach(hd, sockfd);
+#else
+    (void)hd;
+#endif
+    return ESP_OK;
+}
 
 esp_err_t webdav_reply_error(httpd_req_t *req, const char *status)
 {
@@ -799,10 +857,7 @@ esp_err_t esp_webdav_start(const esp_webdav_config_t *config, esp_webdav_handle_
      * device is rebooted. Evicting the least-recently-used connection instead
      * makes that self-healing. */
     httpd_cfg.lru_purge_enable = true;
-
-#if CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS
-    httpd_cfg.open_fn = webdav_debug_open;
-#endif
+    httpd_cfg.open_fn = webdav_socket_open;
 
     esp_err_t err = httpd_start(&srv->httpd, &httpd_cfg);
     if (err != ESP_OK) {
