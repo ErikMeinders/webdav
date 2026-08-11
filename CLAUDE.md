@@ -15,18 +15,13 @@ is a complete flashable ESP-IDF project that consumes it.
 
 All build commands are ESP-IDF (`idf.py`) and must be run from
 `examples/littlefs_webdav` (there is nothing to build at the repo root by
-itself — it's a library component). The example pulls the component from
-the **published registry package** (`erikmeinders/webdav`, see
-`examples/littlefs_webdav/main/idf_component.yml`), not the local `src/` in
-this repo — `managed_components/erikmeinders__webdav/` is a separate,
-downloaded copy pinned to whatever version the manifest specifies.
-
-The dependency uses the component manager's `override_path`, so the example
-builds **this repo's `src/`**, not the downloaded registry copy:
+itself — it's a library component). The example declares the published
+package as its dependency but points `override_path` at this repo, so it
+builds **this repo's `src/`** rather than a downloaded copy:
 
 ```yaml
   erikmeinders/webdav:
-    version: "^0.1.0"
+    version: "^0.2.0"
     override_path: "../../../"
 ```
 
@@ -80,6 +75,10 @@ File layout mirrors verb groups:
 - [src/esp_webdav_util.c](src/esp_webdav_util.c) — shared plumbing: URI
   resolution/sanitization onto filesystem paths, percent-encoding, XML
   escaping, MIME guessing, date formatting, recursive delete.
+- [src/esp_webdav_macos_put.c](src/esp_webdav_macos_put.c) — a session
+  `recv` override that rewrites macOS Finder's chunked upload into an
+  ordinary `Content-Length` PUT and de-chunks the body, entirely below
+  `esp_http_server`. Transparent to every other request.
 
 Every handler is written to avoid buffering whole files/trees in RAM: GET
 and PUT stream through a `WEBDAV_IO_BUF_SIZE`-sized heap buffer via
@@ -111,8 +110,37 @@ public API surface is intentionally small — three functions
   WebDAV dead properties on a plain filesystem.
 - PROPFIND ignores the requested property list and always returns the fixed
   standard set.
-- No byte-range GET, no chunked-`PUT` (requires `Content-Length`), no
-  pagination of directory listings.
+- No pagination of directory listings; byte-range GET handles one range per
+  request (multi-range returns the whole entity, which RFC 7233 allows).
+- A chunked PUT is accepted only when it carries `X-Expected-Entity-Length`
+  (macOS Finder's shape, handled by the shim in
+  [src/esp_webdav_macos_put.c](src/esp_webdav_macos_put.c)); any other
+  chunked upload gets 411, because esp_http_server reports no length for it.
+
+### Things esp_http_server does *not* do, that this component works around
+
+Worth knowing before "simplifying" any of it -- each was found the hard way:
+
+- **It ignores `Connection: close`** entirely (no `F_CONNECTION_CLOSE`
+  handling anywhere), so a request asking for a close would sit idle until
+  the 5s timeout emitted a stray 408. `webdav_dispatch()` reads the header
+  before dispatching (`httpd_resp_send()` drops request headers once a
+  response goes out) and calls `httpd_sess_trigger_close()`.
+- **`httpd_resp_send()` always writes its own `Content-Length`** ahead of any
+  header set with `httpd_resp_set_hdr()`, so setting one there yields two
+  conflicting values -- which RFC 7230 3.3.3 makes unrecoverable. This is why
+  HEAD does not report a size, and why 206 responses are built with raw
+  `httpd_send()`.
+- **It cannot read a chunked request body.** `content_len` is 0 for one and
+  `httpd_req_recv()` clamps to it; the parser has also already buffered the
+  front of the body privately, so raw socket reads can't recover it either.
+  Hence the recv-override shim.
+- **`lru_purge_enable` defaults to false**, so a full socket table makes it
+  `accept()` then immediately `close()` a new connection -- the client just
+  sees a reset. Enabled in `esp_webdav_start()`.
+- **It never sets `TCP_NODELAY`**, and it runs every handler in a *single*
+  task, so one slow handler blocks the whole server. Both matter: hence the
+  `open_fn` and the bounded `webdav_recv_body()`.
 
 See [README.md](README.md) for the full, current limitations list — treat
 it as authoritative over this file if they ever diverge.

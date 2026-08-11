@@ -25,6 +25,13 @@ Cyberduck), Windows (Explorer), or Linux (GVfs/`davfs2`).
 - `PROPPATCH`, `LOCK`, `UNLOCK` — enough of RFC 4918's locking dance for
   clients that insist on it before they'll write a file; not a real lock
   manager (see [Limitations](#limitations))
+- **macOS Finder uploads** — Finder's client (`User-Agent: WebDAVFS`) uploads
+  with `Transfer-Encoding: chunked` plus `X-Expected-Entity-Length`, which
+  `esp_http_server` cannot deliver to a handler at all (it reports a chunked
+  request's length as 0, and `httpd_req_recv()` clamps every read to that).
+  A transport shim rewrites such a request into an ordinary `Content-Length`
+  `PUT` and de-chunks the body before the server parses it, so Finder works
+  as a read-write client. Verified on macOS 26 and 27.
 - Path sanitization against directory traversal (`..` is rejected outright)
 - Optional read-only mode
 
@@ -41,14 +48,14 @@ Cyberduck), Windows (Explorer), or Linux (GVfs/`davfs2`).
 Add it as a dependency via the [ESP Component Registry](https://components.espressif.com/components/erikmeinders/webdav):
 
 ```sh
-idf.py add-dependency "erikmeinders/webdav^0.1.0"
+idf.py add-dependency "erikmeinders/webdav^0.2.0"
 ```
 
 or add it to your project's `idf_component.yml` directly:
 
 ```yaml
 dependencies:
-  erikmeinders/webdav: "^0.1.0"
+  erikmeinders/webdav: "^0.2.0"
 ```
 
 For local development against an unpublished/modified copy, point
@@ -85,6 +92,15 @@ Run `idf.py menuconfig` → `ESP WebDAV Server` to adjust:
 - `ESP_WEBDAV_IO_BUF_SIZE` — chunk size for file transfers (default 4096)
 - `ESP_WEBDAV_ALLOW_DEPTH_INFINITY` — whether `PROPFIND` may recurse an
   entire subtree in one request (default on)
+- `ESP_WEBDAV_HTTPD_STACK_SIZE` — stack for the `esp_http_server` task
+  (default 8192)
+- `ESP_WEBDAV_BODY_TIMEOUT_S` — how long to wait on a client that stops
+  sending a request body before returning `408` (default 30)
+- `ESP_WEBDAV_MAX_DEPTH` — recursion limit for `PROPFIND`/`COPY`/`DELETE`
+  (default 64)
+- `ESP_WEBDAV_DEBUG_CONNECTIONS` — log peers and hex-dump traffic; verbose,
+  and it logs `Authorization` headers, so leave it off in production
+  (default off)
 
 ## Limitations
 
@@ -104,21 +120,14 @@ Run `idf.py menuconfig` → `ESP WebDAV Server` to adjust:
   `getcontenttype`, `getetag`, `creationdate`, `getlastmodified`). Extra
   properties in a response are harmless per RFC 4918 and every WebDAV client
   this was tested against (Finder, Mountain Duck, Cyberduck) is fine with it.
-- **Uploads from macOS Finder don't work** (downloads and browsing do).
-  Finder's built-in client (`User-Agent: WebDAVFS`) sends `PUT` with
-  `Content-Length: 0` plus `X-Expected-Entity-Length: <real size>` and then
-  streams the body anyway. `esp_http_server` believes the `Content-Length`,
-  so `httpd_req_recv()` will never return those bytes — and it has already
-  buffered the front of the body into a private scratch buffer, so reading
-  the socket directly can't recover them either. Such uploads are refused
-  with `411 Length Required` rather than silently producing an empty file.
-  Use Mountain Duck, Cyberduck, or `curl -T`, which all send a real
-  `Content-Length`.
 - Designed for a handful of concurrent clients on an embedded device, not as
-  a general-purpose file server — no chunked-`PUT` support (requires
-  `Content-Length`), and directory listings are not paginated. Byte-range
-  `GET` handles a single range per request; a multi-range request is answered
-  with the whole entity, which RFC 7233 permits.
+  a general-purpose file server — directory listings are not paginated, and
+  byte-range `GET` handles a single range per request (a multi-range request
+  is answered with the whole entity, which RFC 7233 permits).
+- A chunked `PUT` is only accepted when it also carries
+  `X-Expected-Entity-Length` (see below); any other chunked upload is
+  refused with `411 Length Required`, since `esp_http_server` cannot report
+  a length for it.
 
 ## License
 

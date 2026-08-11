@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.2.0"
 description: WebDAV server component (built on esp_http_server) for exposing a mounted filesystem such as LittleFS to WebDAV clients (Finder, Mountain Duck, Cyberduck, Windows Explorer).
 url: https://github.com/ErikMeinders/webdav
 repository: https://github.com/ErikMeinders/webdav.git
