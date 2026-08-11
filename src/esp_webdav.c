@@ -1,12 +1,9 @@
-#include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
-#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -15,6 +12,10 @@
 #include "esp_webdav_priv.h"
 
 static const char *TAG = "esp_webdav";
+
+#include <arpa/inet.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 
 #if CONFIG_ESP_WEBDAV_DEBUG_CONNECTIONS
 
@@ -172,14 +173,18 @@ esp_err_t webdav_reply_error(httpd_req_t *req, const char *status)
 
 esp_err_t webdav_reply_error_close(httpd_req_t *req, const char *status)
 {
-    if (req->content_len == 0) {
-        /* No body to leave behind, so the connection is still in a clean
-         * state -- keep it alive. Tearing down a keep-alive connection for
-         * an ordinary error (a 404 probe, say) just makes clients reconnect
-         * in a loop. */
-        return webdav_reply_error(req, status);
-    }
-
+    /* Deliberately unconditional. An earlier version skipped the close when
+     * req->content_len == 0, reasoning that there was then no body left to
+     * desync on -- but content_len is *exactly* 0 for the two cases that need
+     * closing most: a chunked body, and macOS's "Content-Length: 0 plus
+     * X-Expected-Entity-Length" upload. Both do have bytes on the wire, so
+     * skipping the close left them to be read as the next request
+     * ("parse_block: incomplete (0/N) with parser error = 16", followed by a
+     * spurious 400).
+     *
+     * Callers that just want to report an error on a connection whose body is
+     * already consumed should call webdav_reply_error() instead -- which is
+     * why PROPFIND and PROPPATCH drain their body up front. */
     httpd_resp_set_hdr(req, "Connection", "close");
     webdav_reply_error(req, status);
     /* Returning ESP_FAIL makes esp_http_server close the socket. Required
