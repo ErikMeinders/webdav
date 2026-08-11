@@ -128,6 +128,20 @@ static void mdns_start(void)
      * anything scanning for _http._tcp rather than _webdav._tcp. */
     ESP_ERROR_CHECK(mdns_service_add("ESP32 WebDAV", "_http", "_tcp", 80, txt,
                                       sizeof(txt) / sizeof(txt[0])));
+
+    /* _device-info._tcp is what tells macOS which icon to draw for the share
+     * in Finder's Network view; "Xserve" gets a server rather than a generic
+     * box. It is a TXT-only pseudo-service -- nothing ever connects to it --
+     * so it is advertised on port 0, the same as Samba does.
+     *
+     * Not fatal if the mDNS component refuses it: a missing icon hint is not
+     * worth failing to boot over. */
+    mdns_txt_item_t dev_txt[] = { { "model", "Xserve" } };
+    esp_err_t dev_err = mdns_service_add("ESP32 WebDAV", "_device-info", "_tcp", 0, dev_txt,
+                                          sizeof(dev_txt) / sizeof(dev_txt[0]));
+    if (dev_err != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS _device-info not advertised: %s", esp_err_to_name(dev_err));
+    }
 }
 
 void app_main(void)

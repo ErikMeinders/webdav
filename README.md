@@ -83,6 +83,11 @@ See `include/esp_webdav.h` for the full config struct and
 `examples/littlefs_webdav` for a complete, flashable project (Wi-Fi + LittleFS
 + mDNS + WebDAV).
 
+The example advertises the share over mDNS as `_webdav._tcp` and `_http._tcp`
+(both with a `path=/` TXT record), plus a TXT-only `_device-info._tcp` on
+port 0 carrying `model=Xserve`, which is what makes macOS draw a server icon
+for it in Finder's Network view.
+
 ## Configuration (Kconfig)
 
 Run `idf.py menuconfig` → `ESP WebDAV Server` to adjust:
