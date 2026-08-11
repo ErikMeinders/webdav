@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 
+#include "esp_event.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -25,6 +26,28 @@ static const char *TAG = "webdav_example";
 static void on_wifi_connected(void)
 {
     ESP_LOGI(TAG, "WiFi connected.");
+}
+
+/*
+ * esp-idf-wifi-provisioner only keeps a WIFI_EVENT_STA_DISCONNECTED handler
+ * registered while it is establishing the initial connection --
+ * wifi_sta_connect() unregisters it as soon as the connection succeeds. After
+ * that, nothing reconnects: one beacon timeout (AP reboot, interference, the
+ * radio dozing off) leaves the device offline until it is power-cycled, which
+ * for a file server means silently vanishing mid-transfer.
+ *
+ * Keep our own handler alive for the lifetime of the app instead.
+ */
+static void wifi_reconnect_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
+                                    void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGW(TAG, "WiFi disconnected -- reconnecting");
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "WiFi reconnected -- IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
 }
 
 static void on_portal_start(void)
@@ -47,6 +70,13 @@ static void wifi_connect(void)
      * and connects. Also handles NVS/netif/event-loop init. */
     ESP_ERROR_CHECK(wifi_prov_start(&prov_config));
     ESP_ERROR_CHECK(wifi_prov_wait_for_connection(portMAX_DELAY));
+
+    /* Register only after provisioning has finished, so we don't interfere
+     * with the library's own connect/retry handling while it runs. */
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &wifi_reconnect_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_reconnect_handler, NULL, NULL));
 
     /* This device is a server -- clients initiate every request. The default
      * modem-sleep power save lets the radio doze between beacon intervals,

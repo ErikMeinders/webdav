@@ -5,6 +5,7 @@ idf_component_register(
         erikmeinders__webdav
         esp_wifi
         esp_netif
+        esp_event
 )
 
 # Note: requires a partition named "storage" of subtype "littlefs" in
