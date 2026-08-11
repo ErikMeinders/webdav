@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #include "esp_err.h"
@@ -18,6 +19,25 @@ extern "C" {
 #define WEBDAV_IO_BUF_SIZE     CONFIG_ESP_WEBDAV_IO_BUF_SIZE
 #define WEBDAV_MAX_PREFIX_LEN  64
 #define WEBDAV_BODY_TIMEOUT_MS (CONFIG_ESP_WEBDAV_BODY_TIMEOUT_S * 1000)
+#define WEBDAV_MAX_DEPTH       CONFIG_ESP_WEBDAV_MAX_DEPTH
+
+/*
+ * Append "/name" to a path buffer already holding `len` bytes, for the
+ * recursive directory walks. They keep one shared buffer and restore it after
+ * each child instead of putting a WEBDAV_MAX_PATH_LEN buffer on the stack per
+ * level -- with an 8 KB task stack the latter ran out after about five levels.
+ * Returns the new length, or 0 if it would not fit (buffer left untouched).
+ */
+static inline size_t webdav_path_push(char *buf, size_t len, size_t cap, const char *name)
+{
+    size_t n = strlen(name);
+    if (len + 1 + n >= cap) {
+        return 0;
+    }
+    buf[len] = '/';
+    memcpy(buf + len + 1, name, n + 1);
+    return len + 1 + n;
+}
 
 struct esp_webdav_server {
     httpd_handle_t httpd;

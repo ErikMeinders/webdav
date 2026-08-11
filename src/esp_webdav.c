@@ -615,7 +615,15 @@ esp_err_t webdav_handle_put(httpd_req_t *req)
         remaining -= (size_t)r;
     }
     free(buf);
-    fclose(f);
+
+    /* Buffered stdio only flushes the tail of the file at fclose(), so a write
+     * error -- ENOSPC on a small flash partition above all -- can surface here
+     * and nowhere else. Ignoring it meant answering 201 Created for a
+     * truncated upload. */
+    if (fclose(f) != 0 && io_err == ESP_OK) {
+        ESP_LOGW(TAG, "PUT %s: fclose failed, upload incomplete", path);
+        io_err = ESP_FAIL;
+    }
 
     if (io_err != ESP_OK) {
         /* Either way the body was left partly unread, so the connection has
@@ -783,7 +791,20 @@ esp_err_t webdav_handle_unlock(httpd_req_t *req)
 /* Dispatch + lifecycle                                                     */
 /* ---------------------------------------------------------------------- */
 
-static esp_err_t webdav_dispatch(httpd_req_t *req)
+/* esp_http_server never looks at Connection: close -- it keeps every socket
+ * until an idle timeout, which shows up as a stray 408 a few seconds after an
+ * otherwise successful request. Read the header before dispatching, because
+ * httpd_resp_send() drops the request headers once a response goes out. */
+static bool request_wants_close(httpd_req_t *req)
+{
+    char val[16];
+    if (httpd_req_get_hdr_value_str(req, "Connection", val, sizeof(val)) != ESP_OK) {
+        return false;
+    }
+    return strcasecmp(val, "close") == 0;
+}
+
+static esp_err_t webdav_dispatch_method(httpd_req_t *req)
 {
     switch (req->method) {
         case HTTP_GET:       return webdav_handle_get(req, true);
@@ -800,6 +821,18 @@ static esp_err_t webdav_dispatch(httpd_req_t *req)
         case HTTP_UNLOCK:    return webdav_handle_unlock(req);
         default:             return webdav_reply_error(req, "405 Method Not Allowed");
     }
+}
+
+static esp_err_t webdav_dispatch(httpd_req_t *req)
+{
+    bool want_close = request_wants_close(req);
+    esp_err_t err = webdav_dispatch_method(req);
+    if (err == ESP_OK && want_close) {
+        /* Queue the close rather than returning ESP_FAIL: the request
+         * succeeded, and ESP_FAIL would log it as a handler failure. */
+        httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
+    }
+    return err;
 }
 
 esp_err_t esp_webdav_start(const esp_webdav_config_t *config, esp_webdav_handle_t *out_handle)

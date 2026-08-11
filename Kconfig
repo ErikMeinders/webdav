@@ -35,6 +35,21 @@ menu "ESP WebDAV Server"
             nesting. Increase this further if you use a larger
             ESP_WEBDAV_MAX_PATH_LEN and deeply nested directories.
 
+    config ESP_WEBDAV_MAX_DEPTH
+        int "Maximum directory recursion depth"
+        default 64
+        range 2 200
+        help
+            How deep PROPFIND ("Depth: infinity"), COPY and DELETE will
+            recurse into a directory tree before stopping.
+
+            The walks keep one shared path buffer rather than a buffer per
+            level, so the per-level stack cost is only a few pointers and the
+            real limit is ESP_WEBDAV_MAX_PATH_LEN. Keep this comfortably above
+            any tree you expect: a DELETE that hits the limit fails with 500
+            and leaves the tree in place, so setting it too low makes deep
+            directories impossible to remove.
+
     config ESP_WEBDAV_DEBUG_CONNECTIONS
         bool "Log connecting peers and the first bytes they send"
         default n

@@ -308,8 +308,14 @@ bool webdav_is_dir(const char *path)
     return S_ISDIR(st.st_mode);
 }
 
-esp_err_t webdav_remove_recursive(const char *path)
+/* Works in place on `path`, extending and restoring it around each child so
+ * the stack cost per level stays tiny (see webdav_path_push). */
+static esp_err_t remove_recursive(char *path, size_t len, size_t cap, int depth)
 {
+    if (depth > WEBDAV_MAX_DEPTH) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     struct stat st;
     if (stat(path, &st) != 0) {
         return (errno == ENOENT) ? ESP_ERR_NOT_FOUND : ESP_FAIL;
@@ -324,17 +330,17 @@ esp_err_t webdav_remove_recursive(const char *path)
     }
     esp_err_t ret = ESP_OK;
     struct dirent *ent;
-    char child[WEBDAV_MAX_PATH_LEN];
     while ((ent = readdir(dir)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
-        int n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
-        if (n < 0 || (size_t)n >= sizeof(child)) {
+        size_t child_len = webdav_path_push(path, len, cap, ent->d_name);
+        if (child_len == 0) {
             ret = ESP_ERR_INVALID_SIZE;
             break;
         }
-        ret = webdav_remove_recursive(child);
+        ret = remove_recursive(path, child_len, cap, depth + 1);
+        path[len] = '\0';
         if (ret != ESP_OK) {
             break;
         }
@@ -344,4 +350,22 @@ esp_err_t webdav_remove_recursive(const char *path)
         return ret;
     }
     return (rmdir(path) == 0) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t webdav_remove_recursive(const char *path)
+{
+    /* One heap copy for the whole walk rather than a stack buffer per level. */
+    char *buf = malloc(WEBDAV_MAX_PATH_LEN);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    size_t len = strlen(path);
+    if (len >= WEBDAV_MAX_PATH_LEN) {
+        free(buf);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(buf, path, len + 1);
+    esp_err_t ret = remove_recursive(buf, len, WEBDAV_MAX_PATH_LEN, 0);
+    free(buf);
+    return ret;
 }

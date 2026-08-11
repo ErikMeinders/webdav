@@ -1,6 +1,8 @@
 #include <dirent.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 
 #include "esp_webdav_priv.h"
@@ -23,6 +25,14 @@
         if (_e != ESP_OK) {                                         \
             return _e;                                              \
         }                                                           \
+    } while (0)
+#define SEND_FREE(str)                                                         \
+    do {                                                                       \
+        esp_err_t _e = httpd_resp_send_chunk(req, (str), HTTPD_RESP_USE_STRLEN); \
+        if (_e != ESP_OK) {                                                    \
+            free(scratch);                                                     \
+            return _e;                                                        \
+        }                                                                      \
     } while (0)
 #define SEND_ESC(str)                                    \
     do {                                                 \
@@ -47,10 +57,61 @@ static esp_err_t drain_request_body(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* Emit a single <D:response> element describing fs_path/rel_path. */
+/* Append XML-escaped text to buf. Returns false if it would not fit. */
+static bool append_escaped(char *buf, size_t cap, size_t *len, const char *src)
+{
+    for (size_t i = 0; src[i] != '\0'; i++) {
+        const char *ent = NULL;
+        switch (src[i]) {
+            case '&':  ent = "&amp;";  break;
+            case '<':  ent = "&lt;";   break;
+            case '>':  ent = "&gt;";   break;
+            case '"':  ent = "&quot;"; break;
+            case '\'': ent = "&apos;"; break;
+            default: break;
+        }
+        if (ent) {
+            size_t n = strlen(ent);
+            if (*len + n >= cap) {
+                return false;
+            }
+            memcpy(buf + *len, ent, n);
+            *len += n;
+        } else {
+            if (*len + 1 >= cap) {
+                return false;
+            }
+            buf[(*len)++] = src[i];
+        }
+    }
+    buf[*len] = '\0';
+    return true;
+}
+
+static bool append_fmt(char *buf, size_t cap, size_t *len, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *len, cap - *len, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap - *len) {
+        return false;
+    }
+    *len += (size_t)n;
+    return true;
+}
+
+/*
+ * Emit a single <D:response> element describing fs_path/rel_path.
+ *
+ * Built up in `scratch` and written with one httpd_resp_send_chunk() rather
+ * than the eight-or-so it used to take. Each chunk call is several send()
+ * syscalls of its own (size line, payload, CRLF), so a directory listing was
+ * running to hundreds of tiny packets.
+ */
 static esp_err_t send_entry(httpd_req_t *req, const struct esp_webdav_server *srv,
-                             const char *fs_path, const char *rel_path, bool is_dir,
-                             const struct stat *st)
+                             const char *rel_path, bool is_dir, const struct stat *st,
+                             char *scratch, size_t scratch_cap)
 {
     char href[WEBDAV_MAX_PATH_LEN];
     if (!webdav_build_href(srv, rel_path, is_dir, href, sizeof(href))) {
@@ -63,82 +124,92 @@ static esp_err_t send_entry(httpd_req_t *req, const struct esp_webdav_server *sr
         name = "/";
     }
 
-    SEND("<D:response><D:href>");
-    SEND_ESC(href);
-    SEND("</D:href><D:propstat><D:prop><D:displayname>");
-    SEND_ESC(name);
-    SEND("</D:displayname>");
-
-    if (is_dir) {
-        SEND("<D:resourcetype><D:collection/></D:resourcetype>");
-    } else {
-        SEND("<D:resourcetype/>");
-        char buf[64];
-        int n = snprintf(buf, sizeof(buf), "<D:getcontentlength>%ld</D:getcontentlength>",
-                          (long)st->st_size);
-        SEND_LEN(buf, n);
-        SEND("<D:getcontenttype>");
-        SEND_ESC(webdav_guess_mime_type(name));
-        SEND("</D:getcontenttype>");
-        n = snprintf(buf, sizeof(buf), "<D:getetag>\"%lx-%lx\"</D:getetag>",
-                     (unsigned long)st->st_size, (unsigned long)st->st_mtime);
-        SEND_LEN(buf, n);
-    }
-
     char lastmod[40];
     webdav_format_http_date(st->st_mtime, lastmod, sizeof(lastmod));
     char created[24];
     webdav_format_iso8601(st->st_mtime, created, sizeof(created));
-    char datebuf[160];
-    int n = snprintf(datebuf, sizeof(datebuf),
-                      "<D:creationdate>%s</D:creationdate><D:getlastmodified>%s</D:getlastmodified>",
-                      created, lastmod);
-    SEND_LEN(datebuf, n);
 
-    SEND("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>");
-    return ESP_OK;
+    size_t n = 0;
+    bool ok = append_fmt(scratch, scratch_cap, &n, "<D:response><D:href>");
+    ok = ok && append_escaped(scratch, scratch_cap, &n, href);
+    ok = ok && append_fmt(scratch, scratch_cap, &n,
+                          "</D:href><D:propstat><D:prop><D:displayname>");
+    ok = ok && append_escaped(scratch, scratch_cap, &n, name);
+    ok = ok && append_fmt(scratch, scratch_cap, &n, "</D:displayname>");
+
+    if (is_dir) {
+        ok = ok && append_fmt(scratch, scratch_cap, &n,
+                              "<D:resourcetype><D:collection/></D:resourcetype>");
+    } else {
+        ok = ok && append_fmt(scratch, scratch_cap, &n,
+                              "<D:resourcetype/><D:getcontentlength>%ld</D:getcontentlength>"
+                              "<D:getcontenttype>",
+                              (long)st->st_size);
+        ok = ok && append_escaped(scratch, scratch_cap, &n, webdav_guess_mime_type(name));
+        ok = ok && append_fmt(scratch, scratch_cap, &n,
+                              "</D:getcontenttype><D:getetag>\"%lx-%lx\"</D:getetag>",
+                              (unsigned long)st->st_size, (unsigned long)st->st_mtime);
+    }
+
+    ok = ok && append_fmt(scratch, scratch_cap, &n,
+                          "<D:creationdate>%s</D:creationdate>"
+                          "<D:getlastmodified>%s</D:getlastmodified>"
+                          "</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
+                          "</D:response>",
+                          created, lastmod);
+    if (!ok) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return httpd_resp_send_chunk(req, scratch, n);
 }
 
 /*
- * List the children of dir_path/dir_rel. `levels` is how many further
- * levels of grandchildren to also include: 0 = just these children,
+ * List the children of the directory at `path` (length `len`). `levels` is how
+ * many further levels of grandchildren to include: 0 = just these children,
  * -1 = unlimited (Depth: infinity).
+ *
+ * `path` is extended and restored around each child rather than copied into a
+ * per-level buffer, so recursion costs a few pointers per level instead of two
+ * WEBDAV_MAX_PATH_LEN buffers -- which used to exhaust an 8 KB task stack after
+ * roughly five levels.
  */
 static esp_err_t send_children(httpd_req_t *req, const struct esp_webdav_server *srv,
-                                const char *dir_path, const char *dir_rel, int levels)
+                                char *path, size_t len, size_t cap, int levels, int depth,
+                                char *scratch, size_t scratch_cap)
 {
-    DIR *dir = opendir(dir_path);
+    if (depth > WEBDAV_MAX_DEPTH) {
+        return ESP_OK; /* stop descending; the listing so far stays valid */
+    }
+
+    DIR *dir = opendir(path);
     if (!dir) {
         return ESP_OK; /* vanished between stat() and opendir(), not fatal */
     }
 
     esp_err_t ret = ESP_OK;
     struct dirent *ent;
-    char child_path[WEBDAV_MAX_PATH_LEN];
-    char child_rel[WEBDAV_MAX_PATH_LEN];
     while ((ent = readdir(dir)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
-        int n1 = snprintf(child_path, sizeof(child_path), "%s/%s", dir_path, ent->d_name);
-        int n2 = snprintf(child_rel, sizeof(child_rel), "%s/%s", dir_rel, ent->d_name);
-        if (n1 < 0 || (size_t)n1 >= sizeof(child_path) || n2 < 0 || (size_t)n2 >= sizeof(child_rel)) {
+        size_t child_len = webdav_path_push(path, len, cap, ent->d_name);
+        if (child_len == 0) {
             continue; /* path too long to represent, silently skip */
         }
         struct stat st;
-        if (stat(child_path, &st) != 0) {
+        if (stat(path, &st) != 0) {
+            path[len] = '\0';
             continue;
         }
         bool is_dir = S_ISDIR(st.st_mode);
-        ret = send_entry(req, srv, child_path, child_rel, is_dir, &st);
+        ret = send_entry(req, srv, path + srv->root_len, is_dir, &st, scratch, scratch_cap);
+        if (ret == ESP_OK && is_dir && levels != 0) {
+            ret = send_children(req, srv, path, child_len, cap, levels == -1 ? -1 : levels - 1,
+                                depth + 1, scratch, scratch_cap);
+        }
+        path[len] = '\0';
         if (ret != ESP_OK) {
             break;
-        }
-        if (is_dir && levels != 0) {
-            ret = send_children(req, srv, child_path, child_rel, levels == -1 ? -1 : levels - 1);
-            if (ret != ESP_OK) {
-                break;
-            }
         }
     }
     closedir(dir);
@@ -194,16 +265,27 @@ esp_err_t webdav_handle_propfind(httpd_req_t *req)
     httpd_resp_set_type(req, "application/xml; charset=utf-8");
     httpd_resp_set_hdr(req, "DAV", "1, 2");
 
-    SEND(XML_HEADER "<D:multistatus xmlns:D=\"DAV:\">");
+    /* One scratch buffer for the whole response: each <D:response> is
+     * assembled here and sent as a single chunk. */
+    size_t scratch_cap = WEBDAV_MAX_PATH_LEN * 2 + 512;
+    char *scratch = malloc(scratch_cap);
+    if (!scratch) {
+        return webdav_reply_error(req, "500 Internal Server Error");
+    }
+
+    SEND_FREE(XML_HEADER "<D:multistatus xmlns:D=\"DAV:\">");
 
     bool is_dir = S_ISDIR(st.st_mode);
-    esp_err_t ret = send_entry(req, srv, path, rel, is_dir, &st);
+    esp_err_t ret = send_entry(req, srv, rel, is_dir, &st, scratch, scratch_cap);
     if (ret == ESP_OK && is_dir && depth != 0) {
-        ret = send_children(req, srv, path, rel, depth == -1 ? -1 : 0);
+        ret = send_children(req, srv, path, strlen(path), sizeof(path),
+                            depth == -1 ? -1 : 0, 0, scratch, scratch_cap);
     }
     if (ret != ESP_OK) {
+        free(scratch);
         return ret;
     }
+    free(scratch);
 
     SEND("</D:multistatus>");
     return httpd_resp_send_chunk(req, NULL, 0);

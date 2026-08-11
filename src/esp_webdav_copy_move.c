@@ -83,14 +83,23 @@ static esp_err_t copy_file_contents(const char *src, const char *dst)
     }
 
     fclose(in);
-    fclose(out);
+    /* Buffered stdio flushes the tail at fclose(), so a write error -- ENOSPC
+     * above all -- can surface only here. */
+    if (fclose(out) != 0 && ret == ESP_OK) {
+        ret = ESP_FAIL;
+    }
     return ret;
 }
 
 /* Recursively copy src to dst. `depth0` restricts a collection copy to just
  * the collection itself (Depth: 0 on COPY), matching RFC 4918 semantics. */
-static esp_err_t copy_recursive(const char *src, const char *dst, bool depth0)
+static esp_err_t copy_recursive(char *src, size_t src_len, char *dst, size_t dst_len,
+                                 size_t cap, bool depth0, int depth)
 {
+    if (depth > WEBDAV_MAX_DEPTH) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     struct stat st;
     if (stat(src, &st) != 0) {
         return ESP_ERR_NOT_FOUND;
@@ -113,25 +122,58 @@ static esp_err_t copy_recursive(const char *src, const char *dst, bool depth0)
     }
     esp_err_t ret = ESP_OK;
     struct dirent *ent;
-    char child_src[WEBDAV_MAX_PATH_LEN];
-    char child_dst[WEBDAV_MAX_PATH_LEN];
+    /* One buffer per side, extended and restored around each child, so the
+     * stack cost per level is a few pointers rather than 2x
+     * WEBDAV_MAX_PATH_LEN. */
     while ((ent = readdir(dir)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
-        int n1 = snprintf(child_src, sizeof(child_src), "%s/%s", src, ent->d_name);
-        int n2 = snprintf(child_dst, sizeof(child_dst), "%s/%s", dst, ent->d_name);
-        if (n1 < 0 || (size_t)n1 >= sizeof(child_src) || n2 < 0 || (size_t)n2 >= sizeof(child_dst)) {
+        size_t s_len = webdav_path_push(src, src_len, cap, ent->d_name);
+        size_t d_len = webdav_path_push(dst, dst_len, cap, ent->d_name);
+        if (s_len == 0 || d_len == 0) {
             ret = ESP_ERR_INVALID_SIZE;
             break;
         }
-        ret = copy_recursive(child_src, child_dst, false);
+        ret = copy_recursive(src, s_len, dst, d_len, cap, false, depth + 1);
+        src[src_len] = '\0';
+        dst[dst_len] = '\0';
         if (ret != ESP_OK) {
             break;
         }
     }
     closedir(dir);
     return ret;
+}
+
+/* True if `dst` sits inside the collection at `src`. Copying or moving a
+ * collection into itself would otherwise walk into the copy being created. */
+static bool dst_within_src(const char *src, const char *dst)
+{
+    size_t n = strlen(src);
+    return strncmp(dst, src, n) == 0 && dst[n] == '/';
+}
+
+/*
+ * Shared MOVE/COPY precondition: refuse a destination that is the source, or
+ * inside it. Without this the "delete the destination first" step below would
+ * delete the *source* when the two are the same path -- losing the file
+ * outright -- and a collection copied into its own subtree would recurse
+ * until the stack ran out. RFC 4918 9.8.5/9.9.4 specify 403 here.
+ */
+static esp_err_t check_dst_sane(httpd_req_t *req, const char *src, const struct stat *src_st,
+                                 const char *dst, bool *rejected)
+{
+    *rejected = false;
+    if (strcmp(src, dst) == 0) {
+        *rejected = true;
+        return webdav_reply_error(req, "403 Forbidden");
+    }
+    if (S_ISDIR(src_st->st_mode) && dst_within_src(src, dst)) {
+        *rejected = true;
+        return webdav_reply_error(req, "403 Forbidden");
+    }
+    return ESP_OK;
 }
 
 esp_err_t webdav_handle_move(httpd_req_t *req)
@@ -161,6 +203,12 @@ esp_err_t webdav_handle_move(httpd_req_t *req)
     err = resolve_destination(srv, req, dst, sizeof(dst), NULL);
     if (err != ESP_OK) {
         return webdav_reply_error(req, "400 Bad Request");
+    }
+
+    bool rejected = false;
+    esp_err_t pre = check_dst_sane(req, src, &src_st, dst, &rejected);
+    if (rejected) {
+        return pre;
     }
 
     struct stat dst_st;
@@ -217,6 +265,12 @@ esp_err_t webdav_handle_copy(httpd_req_t *req)
         return webdav_reply_error(req, "400 Bad Request");
     }
 
+    bool rejected = false;
+    esp_err_t pre = check_dst_sane(req, src, &src_st, dst, &rejected);
+    if (rejected) {
+        return pre;
+    }
+
     struct stat dst_st;
     bool dst_exists = (stat(dst, &dst_st) == 0);
     if (dst_exists && !get_overwrite_allowed(req)) {
@@ -229,7 +283,7 @@ esp_err_t webdav_handle_copy(httpd_req_t *req)
         }
     }
 
-    err = copy_recursive(src, dst, depth0);
+    err = copy_recursive(src, strlen(src), dst, strlen(dst), sizeof(src), depth0, 0);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "copy(%s -> %s) failed: %s", src, dst, esp_err_to_name(err));
         return webdav_reply_error(req, "500 Internal Server Error");

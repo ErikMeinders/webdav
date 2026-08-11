@@ -112,7 +112,22 @@ static void mdns_start(void)
     ESP_ERROR_CHECK(mdns_init());
     ESP_ERROR_CHECK(mdns_hostname_set(WEBDAV_MDNS_HOSTNAME));
     ESP_ERROR_CHECK(mdns_instance_name_set("ESP32 WebDAV example"));
-    ESP_ERROR_CHECK(mdns_service_add("esp32-webdav", "_webdav", "_tcp", 80, NULL, 0));
+
+    /* "path" tells a browsing client which URL path to mount; it is the
+     * convention for _webdav._tcp and _http._tcp, and clients that read the
+     * TXT record (Finder's Network view among them) will otherwise guess. */
+    mdns_txt_item_t txt[] = {
+        { "path", "/" },
+        { "u", "" },   /* no username  */
+        { "p", "" },   /* no password  */
+    };
+
+    ESP_ERROR_CHECK(mdns_service_add("ESP32 WebDAV", "_webdav", "_tcp", 80, txt,
+                                      sizeof(txt) / sizeof(txt[0])));
+    /* Advertise plain HTTP too, so the share also turns up for browsers and
+     * anything scanning for _http._tcp rather than _webdav._tcp. */
+    ESP_ERROR_CHECK(mdns_service_add("ESP32 WebDAV", "_http", "_tcp", 80, txt,
+                                      sizeof(txt) / sizeof(txt[0])));
 }
 
 void app_main(void)
